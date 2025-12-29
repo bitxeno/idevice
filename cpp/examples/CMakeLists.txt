@@ -81,6 +81,7 @@ if (WIN32)
     userenv
     ntdll
     bcrypt
+    iphlpapi
   )
 endif()
 
