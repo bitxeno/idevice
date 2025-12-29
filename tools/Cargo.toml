@@ -160,6 +160,14 @@ plist = { version = "1.7" }
 ns-keyed-archive = "0.1.2"
 uuid = "1.16"
 futures-util = { version = "0.3" }
+hex = "0.4"
+base64 = "0.21"
+srp = { git = "https://github.com/bitxeno/PAKEs", branch = "apple_hap" }
+pbkdf2 = "0.12"
+hmac = "0.12"
+rand = "0.8"
+num-bigint = "0.4"
+num-traits = "0.2"
 
 [features]
 default = ["aws-lc"]

@@ -22,6 +22,7 @@ openssl = { version = "0.10", optional = true }
 
 plist = { version = "1.8" }
 serde = { version = "1", features = ["derive"] }
+mac_address = { version = "1.1" }
 ns-keyed-archive = { version = "0.1.4", optional = true }
 crossfire = { version = "2.1", optional = true }
 
@@ -58,6 +59,16 @@ x509-cert = { version = "0.2", optional = true, features = [
 obfstr = { version = "0.4", optional = true }
 
 async_zip = { version = "0.0.18", optional = true }
+
+# Wireless pairing dependencies
+srp = { git = "https://github.com/bitxeno/PAKEs", branch = "apple_hap", optional = true }
+hkdf = { version = "0.12", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+ed25519-dalek = { version = "2", optional = true, features = ["rand_core"] }
+rand_core = { version = "0.6", optional = true }
+hostname = { version = "0.4", optional = true }
+pbkdf2 = { version = "0.12", optional = true }
+hmac = { version = "0.12", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }
@@ -97,7 +108,7 @@ mobile_image_mounter = ["dep:sha2"]
 mobileactivationd = ["dep:reqwest"]
 mobilebackup2 = []
 location_simulation = []
-pair = ["chrono/default", "tokio/time", "dep:sha2", "dep:rsa", "dep:x509-cert"]
+pair = ["chrono/default", "tokio/time", "dep:sha2", "dep:rsa", "dep:x509-cert", "dep:srp", "dep:hkdf", "dep:chacha20poly1305", "dep:ed25519-dalek", "dep:hostname", "dep:rand", "dep:rand_core", "dep:pbkdf2", "dep:hmac"]
 pcapd = []
 preboard_service = []
 obfuscate = ["dep:obfstr"]
