@@ -512,7 +512,10 @@ impl LockdownClient {
                 let host_info_value = plist::Value::Dictionary(host_info);
                 let mut host_info_xml = Vec::new();
                 if host_info_value.to_writer_xml(&mut host_info_xml).is_ok() {
-                    tracing::info!("Host info plist (XML): {}", String::from_utf8_lossy(&host_info_xml));
+                    tracing::info!(
+                        "Host info plist (XML): {}",
+                        String::from_utf8_lossy(&host_info_xml)
+                    );
                 }
 
                 let host_info_opack = crate::utils::opack::encode(&host_info_value);
@@ -574,10 +577,14 @@ impl LockdownClient {
             }
 
             // Check for error
-            if let Some(err) = crate::utils::tlv::tlv_get_uint(payload_data, 0x07) && err > 0 {
+            if let Some(err) = crate::utils::tlv::tlv_get_uint(payload_data, 0x07)
+                && err > 0
+            {
                 if err == 2 && current_state == 4 {
                     tracing::error!("Invalid PIN");
-                } else if err == 3 && let Some(delay) = crate::utils::tlv::tlv_get_uint(payload_data, 0x08) {
+                } else if err == 3
+                    && let Some(delay) = crate::utils::tlv::tlv_get_uint(payload_data, 0x08)
+                {
                     tracing::error!("Pairing blocked for {delay} seconds");
                 }
                 return Err(IdeviceError::UnexpectedResponse);
@@ -626,15 +633,17 @@ impl LockdownClient {
                     nonce[4..12].copy_from_slice(b"PS-Msg06");
 
                     if let Ok(decrypted) = cipher.decrypt(&nonce.into(), encrypted_data.as_ref())
-                        && let Some(device_info_data) = crate::utils::tlv::tlv_get_data(&decrypted, 0x11)
-                        && let Some(device_info) = crate::utils::opack::decode(&device_info_data) {
-                            tracing::info!("Device info: {:?}", device_info);
-                            if let plist::Value::Dictionary(d) = device_info {
-                                device_info_value = Some(d);
-                            } else {
-                                tracing::warn!("Device info is not a dictionary, ignoring");
-                            }
+                        && let Some(device_info_data) =
+                            crate::utils::tlv::tlv_get_data(&decrypted, 0x11)
+                        && let Some(device_info) = crate::utils::opack::decode(&device_info_data)
+                    {
+                        tracing::info!("Device info: {:?}", device_info);
+                        if let plist::Value::Dictionary(d) = device_info {
+                            device_info_value = Some(d);
+                        } else {
+                            tracing::warn!("Device info is not a dictionary, ignoring");
                         }
+                    }
                 }
             }
         }
@@ -864,16 +873,10 @@ impl LockdownClient {
             "HostPrivateKey".into(),
             plist::Value::Data(ca.private_key.clone()),
         );
-        pair_record.insert(
-            "RootPrivateKey".into(),
-            plist::Value::Data(ca.private_key),
-        );
+        pair_record.insert("RootPrivateKey".into(), plist::Value::Data(ca.private_key));
 
         if let Some(escrow) = pair_resp.get("EscrowBag").and_then(|v| v.as_data()) {
-            pair_record.insert(
-                "EscrowBag".into(),
-                plist::Value::Data(escrow.to_vec()),
-            );
+            pair_record.insert("EscrowBag".into(), plist::Value::Data(escrow.to_vec()));
         }
 
         let pairing_file =
@@ -897,7 +900,10 @@ fn get_local_mac() -> Vec<u8> {
             for part in parts.iter().take(6) {
                 match u8::from_str_radix(part.trim(), 16) {
                     Ok(b) => mac.push(b),
-                    Err(_) => { ok = false; break; }
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
                 }
             }
             if ok {
@@ -953,7 +959,9 @@ fn get_hardware_model() -> String {
                     &mut size,
                     std::ptr::null_mut(),
                     0,
-                ) == 0 && let Ok(s) = CStr::from_ptr(buf.as_ptr() as *const c_char).to_str() {
+                ) == 0
+                    && let Ok(s) = CStr::from_ptr(buf.as_ptr() as *const c_char).to_str()
+                {
                     return s.to_string();
                 }
             }
