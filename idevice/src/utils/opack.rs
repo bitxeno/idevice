@@ -171,7 +171,7 @@ fn encode_uint(n: u64, buf: &mut Vec<u8>) {
 }
 
 fn encode_int(n: i64, buf: &mut Vec<u8>) {
-    if n >= 0 && n <= 0x27 {
+    if (0..=0x27).contains(&n) {
         buf.push(8 + n as u8);
     } else if n >= i8::MIN as i64 && n <= i8::MAX as i64 {
         buf.push(OPACK_INT8);
@@ -191,7 +191,7 @@ pub fn decode(data: &[u8]) -> Option<Value> {
     decode_value(data, &mut offset, 0)
 }
 
-fn decode_value(data: &[u8], offset: &mut usize, level: u32) -> Option<Value> {
+fn decode_value(data: &[u8], offset: &mut usize, _level: u32) -> Option<Value> {
     if *offset >= data.len() {
         return None;
     }
@@ -338,7 +338,7 @@ fn decode_value(data: &[u8], offset: &mut usize, level: u32) -> Option<Value> {
                     *offset += 1;
                     break;
                 }
-                if let Some(val) = decode_value(data, offset, level + 1) {
+                if let Some(val) = decode_value(data, offset, _level + 1) {
                     arr.push(val);
                 } else {
                     break;
@@ -360,9 +360,9 @@ fn decode_value(data: &[u8], offset: &mut usize, level: u32) -> Option<Value> {
                     *offset += 1;
                     break;
                 }
-                if let Some(key_val) = decode_value(data, offset, level + 1) {
+                if let Some(key_val) = decode_value(data, offset, _level + 1) {
                     if let Some(key) = key_val.as_string() {
-                        if let Some(val) = decode_value(data, offset, level + 1) {
+                        if let Some(val) = decode_value(data, offset, _level + 1) {
                             dict.insert(key.to_string(), val);
                         } else {
                             break;
@@ -396,7 +396,7 @@ fn decode_data_with_len(data: &[u8], offset: &mut usize, len: usize) -> Option<V
     }
     let d = data[*offset..*offset + len].to_vec();
     *offset += len;
-    Some(Value::Data(d.into()))
+    Some(Value::Data(d))
 }
 
 #[cfg(test)]

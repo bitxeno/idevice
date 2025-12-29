@@ -275,6 +275,7 @@ impl Idevice {
     ///
     /// # Errors
     /// Returns `IdeviceError` if serialization or transmission fails
+    #[allow(dead_code)]
     async fn send_bplist(&mut self, message: plist::Value) -> Result<(), IdeviceError> {
         if let Some(socket) = &mut self.socket {
             debug!("Sending plist: {}", pretty_print_plist(&message));

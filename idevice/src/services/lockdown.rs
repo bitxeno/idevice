@@ -380,7 +380,7 @@ impl LockdownClient {
 
         // Create SRP client
         let srp_client = SrpClient::<Sha512>::new(&G_3072);
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Generate random ephemeral "a" value (64 bytes)
         let mut a = [0u8; 64];
@@ -506,7 +506,7 @@ impl LockdownClient {
                 );
                 host_info.insert("model".into(), plist::Value::String(get_hardware_model()));
                 host_info.insert("name".into(), plist::Value::String(hostname));
-                host_info.insert("mac".into(), plist::Value::Data(get_local_mac().into()));
+                host_info.insert("mac".into(), plist::Value::Data(get_local_mac()));
 
                 // Print host_info as plist XML string for debugging
                 let host_info_value = plist::Value::Dictionary(host_info);
@@ -536,7 +536,7 @@ impl LockdownClient {
             tlv.append(0x06, &[current_state]); // State
 
             // Build request
-            let payload = plist::Value::Data(tlv.into_data().into());
+            let payload = plist::Value::Data(tlv.into_data());
             let flags = if current_state == 1 { 1u64 } else { 0u64 };
 
             let req = crate::plist!({
@@ -574,17 +574,13 @@ impl LockdownClient {
             }
 
             // Check for error
-            if let Some(err) = crate::utils::tlv::tlv_get_uint(payload_data, 0x07) {
-                if err > 0 {
-                    if err == 2 && current_state == 4 {
-                        tracing::error!("Invalid PIN");
-                    } else if err == 3 {
-                        if let Some(delay) = crate::utils::tlv::tlv_get_uint(payload_data, 0x08) {
-                            tracing::error!("Pairing blocked for {delay} seconds");
-                        }
-                    }
-                    return Err(IdeviceError::UnexpectedResponse);
+            if let Some(err) = crate::utils::tlv::tlv_get_uint(payload_data, 0x07) && err > 0 {
+                if err == 2 && current_state == 4 {
+                    tracing::error!("Invalid PIN");
+                } else if err == 3 && let Some(delay) = crate::utils::tlv::tlv_get_uint(payload_data, 0x08) {
+                    tracing::error!("Pairing blocked for {delay} seconds");
                 }
+                return Err(IdeviceError::UnexpectedResponse);
             }
 
             if current_state == 2 {
@@ -629,18 +625,16 @@ impl LockdownClient {
                     let mut nonce = [0u8; 12];
                     nonce[4..12].copy_from_slice(b"PS-Msg06");
 
-                    if let Ok(decrypted) = cipher.decrypt(&nonce.into(), encrypted_data.as_ref()) {
-                        if let Some(device_info_data) = crate::utils::tlv::tlv_get_data(&decrypted, 0x11) {
-                            if let Some(device_info) = crate::utils::opack::decode(&device_info_data) {
-                                    tracing::info!("Device info: {:?}", device_info);
-                                    if let plist::Value::Dictionary(d) = device_info {
-                                        device_info_value = Some(d);
-                                    } else {
-                                        tracing::warn!("Device info is not a dictionary, ignoring");
-                                    }
-                                }
+                    if let Ok(decrypted) = cipher.decrypt(&nonce.into(), encrypted_data.as_ref())
+                        && let Some(device_info_data) = crate::utils::tlv::tlv_get_data(&decrypted, 0x11)
+                        && let Some(device_info) = crate::utils::opack::decode(&device_info_data) {
+                            tracing::info!("Device info: {:?}", device_info);
+                            if let plist::Value::Dictionary(d) = device_info {
+                                device_info_value = Some(d);
+                            } else {
+                                tracing::warn!("Device info is not a dictionary, ignoring");
+                            }
                         }
-                    }
                 }
             }
         }
@@ -691,7 +685,7 @@ impl LockdownClient {
         hk.expand(READ_KEY_INFO, &mut read_key)
             .map_err(|_| IdeviceError::UnexpectedResponse)?;
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Get WiFiAddress
         let wifi_mac = {
@@ -711,8 +705,8 @@ impl LockdownClient {
             let req = crate::plist!({
                 "Label": self.idevice.label.clone(),
                 "Request": "GetValueCU",
-                "Payload": plist::Value::Data(encrypted.into()),
-                "Nonce": plist::Value::Data(nonce.to_vec().into()),
+                "Payload": plist::Value::Data(encrypted),
+                "Nonce": plist::Value::Data(nonce.to_vec()),
                 "ProtocolVersion": "2"
             });
 
@@ -762,8 +756,8 @@ impl LockdownClient {
             let req = crate::plist!({
                 "Label": self.idevice.label.clone(),
                 "Request": "GetValueCU",
-                "Payload": plist::Value::Data(encrypted.into()),
-                "Nonce": plist::Value::Data(nonce.to_vec().into()),
+                "Payload": plist::Value::Data(encrypted),
+                "Nonce": plist::Value::Data(nonce.to_vec()),
                 "ProtocolVersion": "2"
             });
 
@@ -836,8 +830,8 @@ impl LockdownClient {
             let req = crate::plist!({
                 "Label": self.idevice.label.clone(),
                 "Request": "PairCU",
-                "Payload": plist::Value::Data(encrypted.into()),
-                "Nonce": plist::Value::Data(nonce.to_vec().into()),
+                "Payload": plist::Value::Data(encrypted),
+                "Nonce": plist::Value::Data(nonce.to_vec()),
                 "ProtocolVersion": "2"
             });
 
@@ -868,17 +862,17 @@ impl LockdownClient {
         // Add private keys and escrow bag
         pair_record.insert(
             "HostPrivateKey".into(),
-            plist::Value::Data(ca.private_key.clone().into()),
+            plist::Value::Data(ca.private_key.clone()),
         );
         pair_record.insert(
             "RootPrivateKey".into(),
-            plist::Value::Data(ca.private_key.into()),
+            plist::Value::Data(ca.private_key),
         );
 
         if let Some(escrow) = pair_resp.get("EscrowBag").and_then(|v| v.as_data()) {
             pair_record.insert(
                 "EscrowBag".into(),
-                plist::Value::Data(escrow.to_vec().into()),
+                plist::Value::Data(escrow.to_vec()),
             );
         }
 
@@ -891,24 +885,23 @@ impl LockdownClient {
 
 /// Try to obtain a local MAC address.
 /// On macOS this tries `ifconfig en0` first, then falls back to `ifconfig`.
+#[allow(dead_code)]
 fn get_local_mac() -> Vec<u8> {
     // Use `mac_address` crate only; if unavailable, return zeros.
-    if let Ok(opt) = mac_address::get_mac_address() {
-        if let Some(ma) = opt {
-            let s = ma.to_string();
-            let parts: Vec<&str> = s.split(':').collect();
-            if parts.len() >= 6 {
-                let mut mac = Vec::with_capacity(6);
-                let mut ok = true;
-                for i in 0..6 {
-                    match u8::from_str_radix(parts[i].trim(), 16) {
-                        Ok(b) => mac.push(b),
-                        Err(_) => { ok = false; break; }
-                    }
+    if let Ok(Some(ma)) = mac_address::get_mac_address() {
+        let s = ma.to_string();
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() >= 6 {
+            let mut mac = Vec::with_capacity(6);
+            let mut ok = true;
+            for part in parts.iter().take(6) {
+                match u8::from_str_radix(part.trim(), 16) {
+                    Ok(b) => mac.push(b),
+                    Err(_) => { ok = false; break; }
                 }
-                if ok {
-                    return mac;
-                }
+            }
+            if ok {
+                return mac;
             }
         }
     }
@@ -960,11 +953,8 @@ fn get_hardware_model() -> String {
                     &mut size,
                     std::ptr::null_mut(),
                     0,
-                ) == 0
-                {
-                    if let Ok(s) = CStr::from_ptr(buf.as_ptr() as *const c_char).to_str() {
-                        return s.to_string();
-                    }
+                ) == 0 && let Ok(s) = CStr::from_ptr(buf.as_ptr() as *const c_char).to_str() {
+                    return s.to_string();
                 }
             }
         }
