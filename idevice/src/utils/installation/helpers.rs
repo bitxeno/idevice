@@ -208,7 +208,7 @@ async fn upload_file_to_public_staging<P: AsRef<[u8]>>(
 
     let remote_path = format!("{PUBLIC_STAGING}/{}", package_type.get_remote_file()?);
 
-    afc.remove_all(&remote_path).await?;
+    let _ = afc.remove_all(&remote_path).await;
     afc_upload_file(&mut afc, file, &remote_path).await?;
 
     let options = match package_type {
@@ -236,6 +236,7 @@ async fn upload_dir_to_public_staging<P: AsRef<Path>>(
 
     let remote_path = format!("{PUBLIC_STAGING}/{IPA_REMOTE_FILE}");
 
+    let _ = afc.remove_all(&remote_path).await;
     afc_upload_dir(&mut afc, file, &remote_path).await?;
 
     Ok(InstallPackage {
