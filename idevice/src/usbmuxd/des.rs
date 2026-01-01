@@ -55,19 +55,21 @@ impl TryFrom<DeviceListResponse> for UsbmuxdDevice {
 
                     match addr[0] {
                         0x02 => {
-                            // IPv4
-                            Connection::Network(IpAddr::V4(Ipv4Addr::new(
+                            // IPv4: bytes layout has port at 2-3, IPv4 at 4-7
+                            let ip = IpAddr::V4(Ipv4Addr::new(
                                 addr[4], addr[5], addr[6], addr[7],
-                            )))
+                            ));
+                            let port = u16::from_be_bytes([addr[2], addr[3]]);
+                            Connection::Network(std::net::SocketAddr::new(ip, port))
                         }
                         0x1E => {
-                            // IPv6
+                            // IPv6 (simple form): port at 2-3, address at 8-23
                             if addr.len() < 24 {
                                 warn!("IPv6 address is less than 24 bytes");
                                 return Err(IdeviceError::UnexpectedResponse);
                             }
 
-                            Connection::Network(IpAddr::V6(Ipv6Addr::new(
+                            let ip = IpAddr::V6(Ipv6Addr::new(
                                 u16::from_be_bytes([addr[8], addr[9]]),
                                 u16::from_be_bytes([addr[10], addr[11]]),
                                 u16::from_be_bytes([addr[12], addr[13]]),
@@ -76,7 +78,28 @@ impl TryFrom<DeviceListResponse> for UsbmuxdDevice {
                                 u16::from_be_bytes([addr[18], addr[19]]),
                                 u16::from_be_bytes([addr[20], addr[21]]),
                                 u16::from_be_bytes([addr[22], addr[23]]),
-                            )))
+                            ));
+                            let port = u16::from_be_bytes([addr[2], addr[3]]);
+                            Connection::Network(std::net::SocketAddr::new(ip, port))
+                        }
+                        0x10 => {
+                            if addr.len() < 16 {
+                                warn!("IPv4 address is less than 16 bytes");
+                                return Err(IdeviceError::UnexpectedResponse);
+                            }
+                            if addr[1] == 0x02 {
+                                let ip = IpAddr::V4(Ipv4Addr::new(
+                                    addr[4], addr[5], addr[6], addr[7],
+                                ));
+                                let port = u16::from_be_bytes([addr[2], addr[3]]);
+                                Connection::Network(std::net::SocketAddr::new(ip, port))
+                            } else {
+                                warn!(
+                                    "Expected IPv4 family (0x02) but got {:02X} for length 0x10",
+                                    addr[1]
+                                );
+                                Connection::Unknown(format!("Network {:02X}", addr[1]))
+                            }
                         }
                         0x1C => {
                             if addr.len() < 28 {
@@ -85,7 +108,12 @@ impl TryFrom<DeviceListResponse> for UsbmuxdDevice {
                             }
                             if addr[1] == 0x1E {
                                 // IPv6 address starts at offset 8 in sockaddr_in6
-                                Connection::Network(IpAddr::V6(Ipv6Addr::new(
+                                // Bytes 0-1: length and family
+                                // Bytes 2-3: port
+                                // Bytes 4-7: flow info
+                                // Bytes 8-23: IPv6 address (16 bytes)
+                                // Bytes 24-27: scope_id (4 bytes, uint32)
+                                let ipv6 = Ipv6Addr::new(
                                     u16::from_be_bytes([addr[8], addr[9]]),
                                     u16::from_be_bytes([addr[10], addr[11]]),
                                     u16::from_be_bytes([addr[12], addr[13]]),
@@ -94,7 +122,16 @@ impl TryFrom<DeviceListResponse> for UsbmuxdDevice {
                                     u16::from_be_bytes([addr[18], addr[19]]),
                                     u16::from_be_bytes([addr[20], addr[21]]),
                                     u16::from_be_bytes([addr[22], addr[23]]),
-                                )))
+                                );
+                                let scope_id = u32::from_ne_bytes([
+                                    addr[24], addr[25], addr[26], addr[27],
+                                ]);
+
+                                let port = u16::from_be_bytes([addr[2], addr[3]]);
+
+                                let socket_addr = std::net::SocketAddrV6::new(ipv6, port, 0, scope_id);
+                                Connection::Network(std::net::SocketAddr::V6(socket_addr))
+                                
                             } else {
                                 warn!(
                                     "Expected IPv6 family (0x1E) but got {:02X} for length 0x1C",

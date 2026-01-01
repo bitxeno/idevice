@@ -125,6 +125,7 @@ pub unsafe extern "C" fn usbmuxd_provider_new(
     let addr = unsafe { Box::from_raw(addr) }.0;
 
     let p = UsbmuxdProvider {
+        connection_type: idevice::usbmuxd::Connection::Usb,
         addr,
         tag,
         udid,

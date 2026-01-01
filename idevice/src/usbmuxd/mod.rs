@@ -4,7 +4,7 @@
 //! connections to iOS devices over USB and network and pairing files
 
 use std::{
-    net::{AddrParseError, IpAddr, SocketAddr},
+    net::{AddrParseError, SocketAddr},
     pin::Pin,
     str::FromStr,
 };
@@ -29,8 +29,8 @@ mod raw_packet;
 pub enum Connection {
     /// Connected via USB
     Usb,
-    /// Connected via network with specific IP address
-    Network(IpAddr),
+    /// Connected via network with a socket address (preserves IPv6 scope id)
+    Network(std::net::SocketAddr),
     /// Unknown connection type with description
     Unknown(String),
 }
@@ -451,7 +451,14 @@ impl UsbmuxdDevice {
     pub fn to_provider(&self, addr: UsbmuxdAddr, label: impl Into<String>) -> UsbmuxdProvider {
         let label = label.into();
 
+        println!("Creating provider for device {} with connection_type {}", self.udid, match &self.connection_type {
+            Connection::Usb => "USB".to_string(),
+            Connection::Network(socket_addr) => format!("Network({})", socket_addr),
+            Connection::Unknown(s) => format!("Unknown({})", s),
+        });
+
         UsbmuxdProvider {
+            connection_type: self.connection_type.clone(),
             addr,
             tag: self.device_id,
             udid: self.udid.clone(),

@@ -27,6 +27,7 @@ async fn main() {
         )
         .arg(
             Arg::new("wireless")
+                .short('w')
                 .long("wireless")
                 .help("Perform wireless pairing (e.g. for Apple TV)")
                 .action(clap::ArgAction::SetTrue),
@@ -77,12 +78,8 @@ async fn main() {
             return;
         }
     };
-    let id = u
-        .get_buid()
-        .await
-        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string().to_uppercase());
-    let buid = id.clone();
-    let mut s_udid = dev.udid.clone();
+    let id = uuid::Uuid::new_v4().to_string().to_uppercase();
+    let buid = u.get_buid().await.unwrap();
 
     let mut pairing_file = if wireless {
         println!("Starting wireless pairing...");
@@ -98,21 +95,13 @@ async fn main() {
                 .unwrap_or_default()
         };
 
-        let (cu_key, device_info) = lockdown_client
-            .cu_pairing_create(id.clone(), pin_cb, None)
+        lockdown_client
+            .cu_pairing_create(buid.clone(), pin_cb, None)
             .await
             .expect("Failed to perform wireless pairing handshake");
 
-        // Obtain the paired UDID from device info
-        s_udid = device_info
-            .as_ref()
-            .and_then(|d| d.get("udid"))
-            .and_then(|v| v.as_string())
-            .expect("Failed to obtain UDID from device info")
-            .to_string();
-
         lockdown_client
-            .pair_cu(&cu_key, id, buid)
+            .pair_cu(id, buid)
             .await
             .expect("Failed to create pairing record")
     } else {
@@ -129,13 +118,17 @@ async fn main() {
         .expect("Pairing file test failed");
 
     // Add the UDID (jitterbug spec)
-    pairing_file.udid = Some(s_udid.clone());
+    if pairing_file.udid.is_none() {
+        pairing_file.udid = Some(dev.udid.clone());
+    }
+    let s_udid = pairing_file.udid.as_ref().unwrap().clone();
     let pairing_file = pairing_file.serialize().expect("failed to serialize");
-
-    println!("{}", String::from_utf8(pairing_file.clone()).unwrap());
 
     // Save with usbmuxd
     u.save_pair_record(&s_udid, pairing_file)
         .await
         .expect("no save");
+
+    println!("Successfully paired with device UDID: {}", s_udid);
+
 }

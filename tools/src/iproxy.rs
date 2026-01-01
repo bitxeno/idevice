@@ -177,13 +177,14 @@ async fn connect_to_device(
     usbmuxd_addr: &UsbmuxdAddr,
 ) -> Result<Box<dyn ReadWrite>, Box<dyn std::error::Error + Send + Sync>> {
     match &device.connection_type {
-        Connection::Network(ip_addr) => {
+        Connection::Network(socket_addr) => {
             info!(
                 "Requesting connection to NETWORK device {} (serial: {}), port {}",
-                ip_addr, device.udid, port
+                socket_addr, device.udid, port
             );
-            let socket_addr = SocketAddr::new(*ip_addr, port);
-            let stream = TcpStream::connect(socket_addr).await?;
+            let mut new_socket = *socket_addr;
+            new_socket.set_port(port);
+            let stream = TcpStream::connect(new_socket).await?;
             Ok(Box::new(stream) as Box<dyn ReadWrite>)
         }
         Connection::Usb => {

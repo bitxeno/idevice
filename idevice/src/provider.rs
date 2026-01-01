@@ -8,7 +8,8 @@ use std::{future::Future, pin::Pin};
 #[cfg(feature = "tcp")]
 use tokio::net::TcpStream;
 
-use crate::{Idevice, IdeviceError, ReadWrite, pairing_file::PairingFile};
+use crate::{Idevice, IdeviceError, ReadWrite, pairing_file::PairingFile, usbmuxd::{Connection}};
+
 
 #[cfg(feature = "usbmuxd")]
 use crate::usbmuxd::UsbmuxdAddr;
@@ -101,6 +102,8 @@ impl IdeviceProvider for TcpProvider {
 #[cfg(feature = "usbmuxd")]
 #[derive(Debug)]
 pub struct UsbmuxdProvider {
+    /// How the device is connected
+    pub connection_type: Connection,
     /// USB connection address
     pub addr: UsbmuxdAddr,
     /// Connection tag/identifier
@@ -131,10 +134,19 @@ impl IdeviceProvider for UsbmuxdProvider {
         let device_id = self.device_id;
         let label = self.label.clone();
 
-        Box::pin(async move {
-            let usbmuxd = addr.connect(tag).await?;
-            usbmuxd.connect_to_device(device_id, port, &label).await
-        })
+        if let Connection::Network(network_sock) = &self.connection_type {
+            let mut socket_addr = *network_sock;
+            socket_addr.set_port(port);
+            Box::pin(async move {
+                let stream = TcpStream::connect(socket_addr).await?;
+                Ok(Idevice::new(Box::new(stream), label))
+            })
+        } else {
+            Box::pin(async move {
+                let usbmuxd = addr.connect(tag).await?;
+                usbmuxd.connect_to_device(device_id, port, &label).await
+            })
+        }
     }
 
     /// Returns the connection label

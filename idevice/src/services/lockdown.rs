@@ -5,6 +5,7 @@
 
 use plist::Value;
 use tracing::error;
+use base64::Engine;
 
 use crate::{Idevice, IdeviceError, IdeviceService, obf, pairing_file};
 
@@ -18,6 +19,8 @@ use crate::{Idevice, IdeviceError, IdeviceService, obf, pairing_file};
 pub struct LockdownClient {
     /// The underlying device connection with established lockdown service
     pub idevice: crate::Idevice,
+    /// Optionally stores the SRP key for CU pairing
+    pub session_key: Option<Vec<u8>>,
 }
 
 impl IdeviceService for LockdownClient {
@@ -57,7 +60,44 @@ impl LockdownClient {
     /// # Arguments
     /// * `idevice` - Pre-established device connection
     pub fn new(idevice: Idevice) -> Self {
-        Self { idevice }
+        Self {
+            idevice,
+            session_key: None,
+        }
+    }
+
+    /// Load CA values from an XML plist (for testing) and return a `CaReturnCu`.
+    /// Expected keys: DeviceCertificate, HostPrivateKey, HostCertificate, RootPrivateKey, RootCertificate
+    pub fn load_ca_from_plist(&self, xml: &str) -> Result<crate::ca::CaReturnCu, IdeviceError> {
+        let v: plist::Value = plist::from_bytes::<plist::Value>(xml.as_bytes()).map_err(|e| {
+            tracing::error!("Failed to parse plist XML: {e}");
+            IdeviceError::UnexpectedResponse
+        })?;
+
+        let dict: &plist::Dictionary = v
+            .as_dictionary()
+            .ok_or(IdeviceError::UnexpectedResponse)?;
+
+        let get_data = |k: &str| -> Result<Vec<u8>, IdeviceError> {
+            dict.get(k)
+                .and_then(|val: &plist::Value| val.as_data())
+                .map(|d| d.to_vec())
+                .ok_or(IdeviceError::UnexpectedResponse)
+        };
+
+        let dev_cert = get_data("DeviceCertificate")?;
+        let host_key = get_data("HostPrivateKey")?;
+        let host_cert = get_data("HostCertificate")?;
+        let root_key = get_data("RootPrivateKey")?;
+        let root_cert = get_data("RootCertificate")?;
+
+        Ok(crate::ca::CaReturnCu {
+            dev_cert,
+            host_key,
+            host_cert,
+            root_key,
+            root_cert,
+        })
     }
 
     /// Retrieves a specific value from the device
@@ -241,6 +281,100 @@ impl LockdownClient {
         }
     }
 
+    /// Helper to perform encrypted `GetValueCU` request and return the inner `Value`.
+    #[cfg(all(feature = "pair", feature = "rustls"))]
+    async fn get_value_cu(&mut self, key: &str) -> Result<plist::Value, IdeviceError> {
+        let payload = crate::plist!(dict { "Key": key });
+        let result = self
+            .send_request_cu("GetValueCU", plist::Value::Dictionary(payload))
+            .await?;
+
+        result
+            .get("Value")
+            .cloned()
+            .ok_or(IdeviceError::UnexpectedResponse)
+    }
+
+    /// Helper to send an encrypted CU request and return the decrypted plist dictionary.
+    ///
+    /// This derives read/write keys from the stored CU session key, encrypts the given
+    /// `payload` (any `plist::Value`) with ChaCha20-Poly1305 using the write key and a
+    /// random nonce, sends the request named `request_name`, reads the response and
+    /// decrypts it with the read key, returning the resulting plist dictionary.
+    #[cfg(all(feature = "pair", feature = "rustls"))]
+    async fn send_request_cu(
+        &mut self,
+        request_name: &str,
+        payload: plist::Value,
+    ) -> Result<plist::Dictionary, IdeviceError> {
+        use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
+        use hkdf::Hkdf;
+        use rand::RngCore;
+        use sha2::Sha512;
+
+        const WRITE_KEY_SALT: &[u8] = b"WriteKeySaltMDLD";
+        const WRITE_KEY_INFO: &[u8] = b"WriteKeyInfoMDLD";
+        const READ_KEY_SALT: &[u8] = b"ReadKeySaltMDLD";
+        const READ_KEY_INFO: &[u8] = b"ReadKeyInfoMDLD";
+
+        let cu_key = self.session_key.as_ref().ok_or(IdeviceError::UnexpectedResponse)?;
+
+        let mut write_key = [0u8; 32];
+        let mut read_key = [0u8; 32];
+
+        let hk = Hkdf::<Sha512>::new(Some(WRITE_KEY_SALT), cu_key.as_slice());
+        hk.expand(WRITE_KEY_INFO, &mut write_key)
+            .map_err(|_| IdeviceError::UnexpectedResponse)?;
+
+        let hk = Hkdf::<Sha512>::new(Some(READ_KEY_SALT), cu_key.as_slice());
+        hk.expand(READ_KEY_INFO, &mut read_key)
+            .map_err(|_| IdeviceError::UnexpectedResponse)?;
+
+        let mut rng = rand::rng();
+        let mut nonce = [0u8; 12];
+        rng.fill_bytes(&mut nonce);
+
+        let mut buf = Vec::new();
+        payload.to_writer_binary(&mut buf)?;
+
+        let cipher = ChaCha20Poly1305::new_from_slice(&write_key)
+            .map_err(|_| IdeviceError::UnexpectedResponse)?;
+        let encrypted = cipher
+            .encrypt(&nonce.into(), buf.as_ref())
+            .map_err(|_| IdeviceError::UnexpectedResponse)?;
+
+        let req = crate::plist!({
+            "Label": self.idevice.label.clone(),
+            "Request": request_name,
+            "Payload": plist::Value::Data(encrypted),
+            "Nonce": plist::Value::Data(nonce.to_vec()),
+            "ProtocolVersion": "2"
+        });
+
+        self.idevice.send_plist(req).await?;
+        let response = self.idevice.read_plist().await?;
+
+        let enc_payload = response
+            .get("Payload")
+            .and_then(|v| v.as_data())
+            .ok_or(IdeviceError::UnexpectedResponse)?;
+
+        let resp_nonce: [u8; 12] = response
+            .get("Nonce")
+            .and_then(|v| v.as_data())
+            .and_then(|d| d.as_ref().try_into().ok())
+            .unwrap_or(*b"receiveone01");
+
+        let cipher = ChaCha20Poly1305::new_from_slice(&read_key)
+            .map_err(|_| IdeviceError::UnexpectedResponse)?;
+        let decrypted = cipher
+            .decrypt(&resp_nonce.into(), enc_payload.as_ref())
+            .map_err(|_| IdeviceError::UnexpectedResponse)?;
+
+        let result: plist::Dictionary = plist::from_bytes(&decrypted)?;
+        Ok(result)
+    }
+
     /// Generates a pairing file and sends it to the device for trusting.
     /// Note that this does NOT save the file to usbmuxd's cache. That's a responsibility of the
     /// caller.
@@ -343,10 +477,10 @@ impl LockdownClient {
     #[cfg(all(feature = "pair", feature = "rustls"))]
     pub async fn cu_pairing_create<F, Fut>(
         &mut self,
-        pairing_uuid: impl Into<String>,
+        system_buid: impl Into<String>,
         pin_callback: F,
         acl: Option<plist::Dictionary>,
-    ) -> Result<(Vec<u8>, Option<plist::Dictionary>), IdeviceError>
+    ) -> Result<Vec<u8>, IdeviceError>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = String>,
@@ -359,7 +493,7 @@ impl LockdownClient {
         use srp::client::SrpClient;
         use srp::groups::G_3072;
 
-        let pairing_uuid = pairing_uuid.into();
+        let pairing_uuid = system_buid.into();
 
         // SRP6a constants
         const PAIR_SETUP: &[u8] = b"Pair-Setup";
@@ -376,7 +510,6 @@ impl LockdownClient {
         let mut srp_key: Option<Vec<u8>> = None;
         let mut srp_verifier = None;
         let mut setup_encryption_key = [0u8; 32];
-        let mut device_info_value: Option<plist::Dictionary> = None;
 
         // Create SRP client
         let srp_client = SrpClient::<Sha512>::new(&G_3072);
@@ -385,7 +518,6 @@ impl LockdownClient {
         // Generate random ephemeral "a" value (64 bytes)
         let mut a = [0u8; 64];
         rng.fill_bytes(&mut a);
-        tracing::debug!("SRP Ephemeral Private (a) hex: {:02X?}", a);
 
         let mut pin_callback = Some(pin_callback);
 
@@ -405,13 +537,6 @@ impl LockdownClient {
                     .as_ref()
                     .ok_or(IdeviceError::UnexpectedResponse)?;
 
-                tracing::debug!("SRP Salt length: {}", s.len());
-                tracing::debug!("SRP Salt hex: {:02X?}", s);
-                tracing::debug!("SRP Server PubKey length: {}", b_pub.len());
-                tracing::debug!(
-                    "SRP Server PubKey hex (first 32): {:02X?}",
-                    &b_pub[..32.min(b_pub.len())]
-                );
 
                 // Get PIN from callback
                 let pin = pin_callback
@@ -419,11 +544,9 @@ impl LockdownClient {
                     .ok_or(IdeviceError::UnexpectedResponse)?()
                 .await;
                 let pin = pin.trim();
-                tracing::debug!("Using PIN: '{}'", pin);
 
                 // Compute client public key
                 let a_pub = srp_client.compute_public_ephemeral(&a);
-                tracing::debug!("Client PubKey (A) length: {}", a_pub.len());
 
                 // Process server reply to get session key
                 let srp_session = srp_client
@@ -636,20 +759,28 @@ impl LockdownClient {
                         && let Some(device_info_data) =
                             crate::utils::tlv::tlv_get_data(&decrypted, 0x11)
                         && let Some(device_info) = crate::utils::opack::decode(&device_info_data)
-                    {
-                        tracing::info!("Device info: {:?}", device_info);
-                        if let plist::Value::Dictionary(d) = device_info {
-                            device_info_value = Some(d);
-                        } else {
-                            tracing::warn!("Device info is not a dictionary, ignoring");
-                        }
+                        && let plist::Value::Dictionary(d) = &device_info {
+                            let mut output = String::from("Device info:\n");
+                            for (k, v) in d {
+                                let value_str = match v {
+                                    plist::Value::String(s) => s.clone(),
+                                    plist::Value::Data(data) => base64::engine::general_purpose::STANDARD.encode(data),
+                                    plist::Value::Boolean(b) => b.to_string(),
+                                    plist::Value::Integer(i) => i.to_string(),
+                                    plist::Value::Real(f) => f.to_string(),
+                                    _ => format!("{:?}", v),
+                                };
+                                output.push_str(&format!("  {}: {}\n", k, value_str));
+                            }
+                            tracing::debug!("{}", output.trim_end());
                     }
                 }
             }
         }
 
         let key = srp_key.ok_or(IdeviceError::UnexpectedResponse)?;
-        Ok((key, device_info_value))
+        self.session_key = Some(key.clone());
+        Ok(key.clone())
     }
 
     /// Creates a pairing record after successful CU pairing.
@@ -665,223 +796,77 @@ impl LockdownClient {
     #[cfg(all(feature = "pair", feature = "rustls"))]
     pub async fn pair_cu(
         &mut self,
-        cu_key: &[u8],
         host_id: impl Into<String>,
         system_buid: impl Into<String>,
     ) -> Result<crate::pairing_file::PairingFile, IdeviceError> {
-        use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
-        use hkdf::Hkdf;
-        use rand::RngCore;
-        use sha2::Sha512;
-
         let host_id = host_id.into();
         let system_buid = system_buid.into();
 
-        // Derive encryption keys
-        const WRITE_KEY_SALT: &[u8] = b"WriteKeySaltMDLD";
-        const WRITE_KEY_INFO: &[u8] = b"WriteKeyInfoMDLD";
-        const READ_KEY_SALT: &[u8] = b"ReadKeySaltMDLD";
-        const READ_KEY_INFO: &[u8] = b"ReadKeyInfoMDLD";
-
-        let mut write_key = [0u8; 32];
-        let mut read_key = [0u8; 32];
-
-        let hk = Hkdf::<Sha512>::new(Some(WRITE_KEY_SALT), cu_key);
-        hk.expand(WRITE_KEY_INFO, &mut write_key)
-            .map_err(|_| IdeviceError::UnexpectedResponse)?;
-
-        let hk = Hkdf::<Sha512>::new(Some(READ_KEY_SALT), cu_key);
-        hk.expand(READ_KEY_INFO, &mut read_key)
-            .map_err(|_| IdeviceError::UnexpectedResponse)?;
-
-        let mut rng = rand::rng();
-
-        // Get WiFiAddress
         let wifi_mac = {
-            let mut nonce = [0u8; 12];
-            rng.fill_bytes(&mut nonce);
-
-            let payload = crate::plist!(dict { "Key": "WiFiAddress" });
-            let mut buf = Vec::new();
-            plist::Value::Dictionary(payload).to_writer_binary(&mut buf)?;
-
-            let cipher = ChaCha20Poly1305::new_from_slice(&write_key)
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-            let encrypted = cipher
-                .encrypt(&nonce.into(), buf.as_ref())
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-
-            let req = crate::plist!({
-                "Label": self.idevice.label.clone(),
-                "Request": "GetValueCU",
-                "Payload": plist::Value::Data(encrypted),
-                "Nonce": plist::Value::Data(nonce.to_vec()),
-                "ProtocolVersion": "2"
-            });
-
-            self.idevice.send_plist(req).await?;
-            let response = self.idevice.read_plist().await?;
-
-            let enc_payload = response
-                .get("Payload")
-                .and_then(|v| v.as_data())
-                .ok_or(IdeviceError::UnexpectedResponse)?;
-
-            let resp_nonce: [u8; 12] = response
-                .get("Nonce")
-                .and_then(|v| v.as_data())
-                .and_then(|d| d.as_ref().try_into().ok())
-                .unwrap_or(*b"receiveone01");
-
-            let cipher = ChaCha20Poly1305::new_from_slice(&read_key)
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-            let decrypted = cipher
-                .decrypt(&resp_nonce.into(), enc_payload.as_ref())
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-
-            let result: plist::Dictionary = plist::from_bytes(&decrypted)?;
-            result
-                .get("Value")
-                .and_then(|v| v.as_string())
+            let v = self
+                .get_value_cu("WiFiAddress")
+                .await?;
+            v.as_string()
                 .ok_or(IdeviceError::UnexpectedResponse)?
                 .to_string()
         };
 
-        // Get DevicePublicKey
         let pub_key = {
-            let mut nonce = [0u8; 12];
-            rng.fill_bytes(&mut nonce);
-
-            let payload = crate::plist!(dict { "Key": "DevicePublicKey" });
-            let mut buf = Vec::new();
-            plist::Value::Dictionary(payload).to_writer_binary(&mut buf)?;
-
-            let cipher = ChaCha20Poly1305::new_from_slice(&write_key)
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-            let encrypted = cipher
-                .encrypt(&nonce.into(), buf.as_ref())
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-
-            let req = crate::plist!({
-                "Label": self.idevice.label.clone(),
-                "Request": "GetValueCU",
-                "Payload": plist::Value::Data(encrypted),
-                "Nonce": plist::Value::Data(nonce.to_vec()),
-                "ProtocolVersion": "2"
-            });
-
-            self.idevice.send_plist(req).await?;
-            let response = self.idevice.read_plist().await?;
-
-            let enc_payload = response
-                .get("Payload")
-                .and_then(|v| v.as_data())
-                .ok_or(IdeviceError::UnexpectedResponse)?;
-
-            let resp_nonce: [u8; 12] = response
-                .get("Nonce")
-                .and_then(|v| v.as_data())
-                .and_then(|d| d.as_ref().try_into().ok())
-                .unwrap_or(*b"receiveone01");
-
-            let cipher = ChaCha20Poly1305::new_from_slice(&read_key)
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-            let decrypted = cipher
-                .decrypt(&resp_nonce.into(), enc_payload.as_ref())
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-
-            let result: plist::Dictionary = plist::from_bytes(&decrypted)?;
-            result
-                .get("Value")
-                .and_then(|v| v.as_data())
+            let v = self
+                .get_value_cu("DevicePublicKey")
+                .await?;
+            v.as_data()
                 .ok_or(IdeviceError::UnexpectedResponse)?
                 .to_vec()
         };
 
         // Generate certificates
-        let ca = crate::ca::generate_certificates(&pub_key, None).map_err(|e| {
+        let ca = crate::ca::generate_certificates_cu(&pub_key).map_err(|e| {
             tracing::error!("Failed to generate certificates: {e}");
             IdeviceError::UnexpectedResponse
         })?;
 
         // Build pair record
         let mut pair_record = crate::plist!(dict {
-            "DevicePublicKey": pub_key.clone(),
-            "DeviceCertificate": ca.dev_cert.clone(),
+            "DevicePublicKey": pub_key,
+            "DeviceCertificate": ca.dev_cert,
+            "HostPrivateKey": ca.host_key.clone(),
             "HostCertificate": ca.host_cert.clone(),
-            "HostID": host_id.clone(),
-            "RootCertificate": ca.host_cert.clone(),
-            "SystemBUID": system_buid.clone(),
-            "WiFiMACAddress": wifi_mac.clone(),
+            "RootPrivateKey": ca.root_key.clone(),
+            "RootCertificate": ca.root_cert.clone(),
+            "SystemBUID": system_buid,
+            "HostID": host_id,
+            "WiFiMACAddress": wifi_mac,
         });
 
-        // Send PairCU request
-        let pair_resp = {
-            let mut nonce = [0u8; 12];
-            rng.fill_bytes(&mut nonce);
+        // Build request payload dictionary (remove private keys before sending)
+        let mut request_pair_record = pair_record.clone();
+        request_pair_record.remove("HostPrivateKey");
+        request_pair_record.remove("RootPrivateKey");
+        request_pair_record.remove("DevicePublicKey");
+        request_pair_record.remove("WiFiMACAddress");
 
-            let request_pair_record = pair_record.clone();
-            let payload = crate::plist!(dict {
-                "PairRecord": plist::Value::Dictionary(request_pair_record),
-                "PairingOptions": {
-                    "ExtendedPairingErrors": true
-                }
-            });
-            let mut buf = Vec::new();
-            plist::Value::Dictionary(payload).to_writer_binary(&mut buf)?;
+        let payload_dict = crate::plist!(dict {
+            "PairRecord": plist::Value::Dictionary(request_pair_record),
+            "PairingOptions": {
+                "ExtendedPairingErrors": true
+            }
+        });
 
-            let cipher = ChaCha20Poly1305::new_from_slice(&write_key)
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-            let encrypted = cipher
-                .encrypt(&nonce.into(), buf.as_ref())
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
+        let pair_resp = self
+            .send_request_cu("PairCU", plist::Value::Dictionary(payload_dict))
+            .await?;
 
-            let req = crate::plist!({
-                "Label": self.idevice.label.clone(),
-                "Request": "PairCU",
-                "Payload": plist::Value::Data(encrypted),
-                "Nonce": plist::Value::Data(nonce.to_vec()),
-                "ProtocolVersion": "2"
-            });
-
-            self.idevice.send_plist(req).await?;
-            let response = self.idevice.read_plist().await?;
-
-            let enc_payload = response
-                .get("Payload")
-                .and_then(|v| v.as_data())
-                .ok_or(IdeviceError::UnexpectedResponse)?;
-
-            let resp_nonce: [u8; 12] = response
-                .get("Nonce")
-                .and_then(|v| v.as_data())
-                .and_then(|d| d.as_ref().try_into().ok())
-                .unwrap_or(*b"receiveone01");
-
-            let cipher = ChaCha20Poly1305::new_from_slice(&read_key)
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-            let decrypted = cipher
-                .decrypt(&resp_nonce.into(), enc_payload.as_ref())
-                .map_err(|_| IdeviceError::UnexpectedResponse)?;
-
-            let result: plist::Dictionary = plist::from_bytes(&decrypted)?;
-            result
-        };
-
-        // Add private keys and escrow bag
-        pair_record.insert(
-            "HostPrivateKey".into(),
-            plist::Value::Data(ca.private_key.clone()),
-        );
-        pair_record.insert("RootPrivateKey".into(), plist::Value::Data(ca.private_key));
-
+        // Add escrow bag and UDID to pair record
         if let Some(escrow) = pair_resp.get("EscrowBag").and_then(|v| v.as_data()) {
             pair_record.insert("EscrowBag".into(), plist::Value::Data(escrow.to_vec()));
+        }
+        if let Some(udid) = pair_resp.get("UDID").and_then(|v| v.as_string()) {
+            pair_record.insert("UDID".into(), plist::Value::String(udid.to_string()));
         }
 
         let pairing_file =
             crate::pairing_file::PairingFile::from_value(&plist::Value::Dictionary(pair_record))?;
-
         Ok(pairing_file)
     }
 }

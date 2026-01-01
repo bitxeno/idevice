@@ -18,7 +18,7 @@ rustls = { version = "0.23", default-features = false, features = [
   "tls12",
 ], optional = true }
 tokio-openssl = { version = "0.6", optional = true }
-openssl = { version = "0.10", optional = true }
+openssl = "0.10"
 
 plist = { version = "1.8" }
 serde = { version = "1", features = ["derive"] }
@@ -50,6 +50,8 @@ async-stream = { version = "0.3.6", optional = true }
 
 sha2 = { version = "0.10", optional = true, features = ["oid"] }
 
+sha1 = { version = "0.10" }
+
 rsa = { version = "0.9", optional = true, features = ["sha2"] }
 x509-cert = { version = "0.2", optional = true, features = [
   "builder",
@@ -80,7 +82,7 @@ default = ["aws-lc"]
 aws-lc = ["rustls", "rustls/aws-lc-rs", "tokio-rustls/aws-lc-rs"]
 ring = ["rustls", "rustls/ring", "tokio-rustls/ring"]
 rustls = ["dep:rustls", "dep:tokio-rustls"]
-openssl = ["dep:openssl", "dep:tokio-openssl"]
+openssl = ["dep:tokio-openssl"]
 
 afc = ["dep:chrono", "dep:futures"]
 amfi = []
