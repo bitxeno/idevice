@@ -451,12 +451,6 @@ impl UsbmuxdDevice {
     pub fn to_provider(&self, addr: UsbmuxdAddr, label: impl Into<String>) -> UsbmuxdProvider {
         let label = label.into();
 
-        println!("Creating provider for device {} with connection_type {}", self.udid, match &self.connection_type {
-            Connection::Usb => "USB".to_string(),
-            Connection::Network(socket_addr) => format!("Network({})", socket_addr),
-            Connection::Unknown(s) => format!("Unknown({})", s),
-        });
-
         UsbmuxdProvider {
             connection_type: self.connection_type.clone(),
             addr,
