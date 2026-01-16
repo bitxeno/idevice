@@ -2,6 +2,7 @@ use async_zip::base::read::seek::ZipFileReader;
 use futures::AsyncReadExt as _;
 use plist_macro::plist;
 use std::{io::Cursor, path::Path};
+use chrono::Utc;
 use tokio::io::{AsyncBufRead, AsyncSeek, BufReader};
 
 use crate::{
@@ -157,6 +158,30 @@ pub async fn afc_upload_dir(
     let mut queue: VecDeque<(std::path::PathBuf, String)> = VecDeque::new();
     queue.push_back((local_dir.to_path_buf(), remote_dir.to_string()));
 
+    // Count total files to upload so we can print progress (iterative to avoid recursive async)
+    let total_files = {
+        let mut total: u64 = 0;
+        let mut dirs: VecDeque<std::path::PathBuf> = VecDeque::new();
+        dirs.push_back(local_dir.to_path_buf());
+
+        while let Some(p) = dirs.pop_front() {
+            let mut rd = tokio::fs::read_dir(&p).await?;
+            while let Some(entry) = rd.next_entry().await? {
+                let meta = entry.metadata().await?;
+                let path = entry.path();
+                if meta.is_dir() {
+                    dirs.push_back(path);
+                } else if meta.is_file() {
+                    total = total.saturating_add(1);
+                }
+            }
+        }
+
+        total
+    };
+    let mut uploaded_files: u64 = 0;
+    let mut prev_percent: Option<u64> = None;
+
     while let Some((cur_local, cur_remote)) = queue.pop_front() {
         let mut rd = tokio::fs::read_dir(&cur_local).await?;
         while let Some(entry) = rd.next_entry().await? {
@@ -173,6 +198,20 @@ pub async fn afc_upload_dir(
                 queue.push_back((child_local, child_remote));
             } else if meta.is_file() {
                 afc_upload_file(afc, tokio::fs::read(&child_local).await?, &child_remote).await?;
+                // update progress after successful upload
+                uploaded_files = uploaded_files.saturating_add(1);
+                if total_files > 0 {
+                    let mut percent = (uploaded_files * 100) / total_files;
+                    if percent > 100 {
+                        percent = 100;
+                    }
+                    // only print when percent changed since last print
+                    if prev_percent.map(|p| p != percent).unwrap_or(true) {
+                        let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+                        println!("[{} INFO  idevice::afc_upload_dir] Upload files to device progress: {}%", ts, percent);
+                        prev_percent = Some(percent);
+                    }
+                }
             }
         }
     }
