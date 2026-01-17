@@ -205,8 +205,13 @@ pub async fn afc_upload_dir(
                     if percent > 100 {
                         percent = 100;
                     }
-                    // only print when percent changed since last print
-                    if prev_percent.map(|p| p != percent).unwrap_or(true) {
+                    // only print when percent increased by at least 5% since last print,
+                    // or on first print / final 100%
+                    let should_print = prev_percent
+                        .map(|p| percent >= p.saturating_add(5))
+                        .unwrap_or(true)
+                        || percent == 100;
+                    if should_print {
                         let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
                         println!("[{} INFO  idevice::afc_upload_dir] Upload files to device progress: {}%", ts, percent);
                         prev_percent = Some(percent);
