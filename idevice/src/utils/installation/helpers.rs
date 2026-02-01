@@ -2,7 +2,7 @@ use async_zip::base::read::seek::ZipFileReader;
 use futures::AsyncReadExt as _;
 use plist_macro::plist;
 use std::{io::Cursor, path::Path};
-use chrono::Utc;
+use chrono::{Utc, Local};
 use tokio::io::{AsyncBufRead, AsyncSeek, BufReader};
 
 use crate::{
@@ -225,7 +225,7 @@ pub async fn afc_upload_dir(
                         .unwrap_or(true)
                         || percent == 100;
                     if should_print {
-                        let ts = Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+                        let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
                         println!("[{} INFO  idevice::afc_upload_dir] Upload files to device progress: {}%", ts, percent);
                         prev_percent = Some(percent);
                     }
