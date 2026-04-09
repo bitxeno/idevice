@@ -851,6 +851,22 @@ pub enum IdeviceError {
     #[cfg(feature = "installation_proxy")]
     #[error("Application verification failed: {0}")]
     ApplicationVerificationFailed(String),
+
+    #[cfg(feature = "xctest")]
+    #[error("application is not installed on the device")]
+    AppNotInstalled,
+
+    #[cfg(feature = "xctest")]
+    #[error("test runner did not connect within the timeout")]
+    TestRunnerTimeout,
+
+    #[cfg(feature = "xctest")]
+    #[error("test runner disconnected before the test plan completed")]
+    TestRunnerDisconnected,
+
+    #[cfg(feature = "xctest")]
+    #[error("xctest session timed out after {0:.1}s")]
+    XcTestTimeout(f64),
 }
 
 impl IdeviceError {
@@ -995,6 +1011,14 @@ impl IdeviceError {
             IdeviceError::NotificationProxyDeath => 202,
             #[cfg(feature = "installation_proxy")]
             IdeviceError::ApplicationVerificationFailed(_) => 203,
+            #[cfg(feature = "xctest")]
+            IdeviceError::AppNotInstalled => 204,
+            #[cfg(feature = "xctest")]
+            IdeviceError::TestRunnerTimeout => 205,
+            #[cfg(feature = "xctest")]
+            IdeviceError::TestRunnerDisconnected => 206,
+            #[cfg(feature = "xctest")]
+            IdeviceError::XcTestTimeout(_) => 207,
         }
     }
 

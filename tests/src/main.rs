@@ -10,6 +10,7 @@ use idevice::{
     lockdown::LockdownClient,
     usbmuxd::{Connection, UsbmuxdAddr, UsbmuxdConnection},
 };
+use jkcli::JkFlag;
 
 mod afc;
 mod amfi;
@@ -34,6 +35,7 @@ mod rsd_services;
 mod screenshotr;
 mod springboard;
 mod syslog_relay;
+mod xctest;
 
 /// Runs an async test case, printing PASS/FAIL and updating the counters.
 ///
@@ -61,6 +63,11 @@ macro_rules! run_test {
 #[tokio::main]
 async fn main() -> ExitCode {
     tracing_subscriber::fmt::init();
+
+    let args = jkcli::JkCommand::new()
+        .with_flag(JkFlag::new("no-warn"))
+        .collect()
+        .unwrap();
 
     println!("idevice test harness");
 
@@ -105,19 +112,24 @@ async fn main() -> ExitCode {
     );
     println!("This test suite can have unintended consequnces on misbehaving code.");
     println!("Make sure this is a device you are willing to destroy.");
-    println!("This is your last warning. Continuing in 5...");
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    println!("4...");
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    println!("3...");
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    println!("2...");
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    println!("1...");
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    println!("0...");
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    println!("Starting test suite on {}", usbmuxd_device.udid);
+
+    if args.has_flag("no-warn") {
+        println!("Skipping the warn countdown, good luck");
+    } else {
+        println!("This is your last warning. Continuing in 5...");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        println!("4...");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        println!("3...");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        println!("2...");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        println!("1...");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        println!("0...");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        println!("Starting test suite on {}", usbmuxd_device.udid);
+    }
 
     let mut success = 0u32;
     let mut failure = 0u32;
@@ -256,6 +268,16 @@ async fn main() -> ExitCode {
     // ── DVT / Instruments ─────────────────────────────────────────────────────
     println!("\n── DVT / Instruments ────────────────────────────────────────────");
     dvt::run_tests(&usbmuxd_device, &mut success, &mut failure).await;
+
+    // ── XCTest / WDA (requires WDA_BUNDLE_ID env var) ─────────────────────────
+    println!("\n── XCTest / WDA ─────────────────────────────────────────────────");
+    xctest::run_tests(
+        std::sync::Arc::new(usbmuxd_device.clone())
+            as std::sync::Arc<dyn idevice::provider::IdeviceProvider>,
+        &mut success,
+        &mut failure,
+    )
+    .await;
 
     println!("\n═══════════════════════════════════════════════════════════════");
     println!("All tests finished!");

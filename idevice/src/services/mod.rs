@@ -55,3 +55,7 @@ pub mod simulate_location;
 pub mod springboardservices;
 #[cfg(feature = "syslog_relay")]
 pub mod syslog_relay;
+#[cfg(feature = "wda")]
+pub mod wda;
+#[cfg(feature = "wda")]
+pub mod wda_bridge;

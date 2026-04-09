@@ -53,6 +53,7 @@ mod screenshot;
 mod springboardservices;
 mod syslog_relay;
 mod sysmontap;
+mod xctest;
 
 mod pcap;
 
@@ -141,9 +142,13 @@ async fn main() {
         .with_subcommand("condition_inducer", condition_inducer::register())
         .with_subcommand("network_monitor", network_monitor::register())
         .with_subcommand("sysmontap", sysmontap::register())
+        .with_subcommand("xctest", xctest::register())
         .subcommand_required(true)
-        .collect()
-        .expect("Failed to collect CLI args");
+        .collect();
+
+    let Some(arguments) = arguments else {
+        return;
+    };
 
     let udid = arguments.get_flag::<String>("udid");
     let host = arguments.get_flag::<String>("host");
@@ -288,6 +293,9 @@ async fn main() {
         }
         "sysmontap" => {
             sysmontap::main(sub_args, provider).await;
+        }
+        "xctest" => {
+            xctest::main(sub_args, provider).await;
         }
         _ => unreachable!(),
     }

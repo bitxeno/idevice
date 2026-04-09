@@ -35,7 +35,7 @@
 //! ```
 
 use plist::{Dictionary, Value};
-use tracing::{debug, warn};
+use tracing::warn;
 
 use super::errors::DvtError;
 use crate::{IdeviceError, ReadWrite, dvt::message::AuxValue, obf};
@@ -50,6 +50,71 @@ use super::remote_server::{Channel, RemoteServerClient};
 pub struct ProcessControlClient<'a, R: ReadWrite> {
     /// The underlying channel for communication
     channel: Channel<'a, R>,
+}
+
+fn parse_u64_value(value: &Value) -> Option<u64> {
+    match value {
+        Value::Integer(v) => v.as_unsigned(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn extract_ns_error_message(value: &Value) -> Option<String> {
+    let dict = match value {
+        Value::Dictionary(dict) => dict,
+        _ => return None,
+    };
+
+    let user_info = match dict.get("NSUserInfo") {
+        Some(Value::Array(items)) => items,
+        _ => {
+            return dict
+                .get("NSLocalizedDescription")
+                .and_then(Value::as_string)
+                .map(ToOwned::to_owned);
+        }
+    };
+
+    let mut description = dict
+        .get("NSLocalizedDescription")
+        .and_then(Value::as_string)
+        .map(ToOwned::to_owned);
+    let mut reason = dict
+        .get("NSLocalizedFailureReason")
+        .and_then(Value::as_string)
+        .map(ToOwned::to_owned);
+
+    for entry in user_info {
+        let Value::Dictionary(item) = entry else {
+            continue;
+        };
+
+        let key = item.get("key").and_then(Value::as_string);
+        let value = item.get("value");
+
+        match (key, value) {
+            (Some("NSLocalizedDescription"), Some(Value::String(s))) if description.is_none() => {
+                description = Some(s.clone());
+            }
+            (Some("NSLocalizedFailureReason"), Some(Value::String(s))) if reason.is_none() => {
+                reason = Some(s.clone());
+            }
+            (Some("NSUnderlyingError"), Some(v)) => {
+                if let Some(message) = extract_ns_error_message(v) {
+                    return Some(message);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match (description, reason) {
+        (Some(description), Some(reason)) => Some(format!("{description}: {reason}")),
+        (Some(description), None) => Some(description),
+        (None, Some(reason)) => Some(reason),
+        (None, None) => None,
+    }
 }
 
 impl<'a, R: ReadWrite> ProcessControlClient<'a, R> {
@@ -86,7 +151,7 @@ impl<'a, R: ReadWrite> ProcessControlClient<'a, R> {
     /// * `Err(IdeviceError)` - If launch fails
     ///
     /// # Errors
-    /// * `IdeviceError::UnexpectedResponse` if server response is invalid
+    /// * `IdeviceError::UnexpectedResponse("unexpected response".into())` if server response is invalid
     /// * Other communication or serialization errors
     pub async fn launch_app(
         &mut self,
@@ -114,23 +179,24 @@ impl<'a, R: ReadWrite> ProcessControlClient<'a, R> {
             None => Dictionary::new(),
         };
 
-        self.channel
-            .call_method(
+        let res = self
+            .channel
+            .call_method_with_reply(
                 Some(method),
                 Some(vec![
                     AuxValue::archived_value(""),
                     AuxValue::archived_value(bundle_id.into()),
                     AuxValue::archived_value(env_vars),
-                    AuxValue::archived_value(arguments),
+                    AuxValue::archived_value(Value::Array(
+                        arguments
+                            .into_iter()
+                            .map(|(_, value)| value)
+                            .collect::<Vec<_>>(),
+                    )),
                     AuxValue::archived_value(options),
                 ]),
-                true,
             )
             .await?;
-
-        let res = self.channel.read_message().await?;
-        debug!("Launch response message: {res:#?}");
-        debug!("Launch response data: {:?}", res.data);
 
         match res.data {
             Some(Value::Integer(p)) => match p.as_unsigned() {
@@ -146,6 +212,61 @@ impl<'a, R: ReadWrite> ProcessControlClient<'a, R> {
                 warn!("Did not get integer response");
                 Err(IdeviceError::UnexpectedResponse(
                     "expected integer PID in launch app response".into(),
+                ))
+            }
+        }
+    }
+
+    /// Launches a process with fully customisable options.
+    ///
+    /// This is a lower-level variant of [`launch_app`](Self::launch_app) that
+    /// accepts a pre-built `args` array (`Vec<plist::Value>`) and a custom
+    /// `options` dictionary (e.g. `{"StartSuspendedKey": false, "ActivateSuspended": true}`).
+    ///
+    /// # Arguments
+    /// * `bundle_id`  - Bundle identifier of the app to launch
+    /// * `env`        - Environment variables
+    /// * `args`       - Launch arguments (each element already a `plist::Value::String`)
+    /// * `options`    - Launch options dictionary
+    ///
+    /// # Returns
+    /// * `Ok(u64)` - PID of the launched process
+    pub(crate) async fn launch_with_options(
+        &mut self,
+        bundle_id: impl Into<String>,
+        env: Dictionary,
+        args: Vec<Value>,
+        options: Dictionary,
+    ) -> Result<u64, IdeviceError> {
+        let res = self
+            .channel
+            .call_method_with_reply(
+                Some(Value::String(
+                    "launchSuspendedProcessWithDevicePath:bundleIdentifier:environment:arguments:options:"
+                        .into(),
+                )),
+                Some(vec![
+                    AuxValue::archived_value(Value::String(String::new())), // device_path = ""
+                    AuxValue::archived_value(bundle_id.into()),
+                    AuxValue::archived_value(Value::Dictionary(env)),
+                    AuxValue::archived_value(Value::Array(args)),
+                    AuxValue::archived_value(Value::Dictionary(options)),
+                ]),
+            )
+            .await?;
+        match res.data {
+            Some(v) => parse_u64_value(&v).ok_or_else(|| {
+                if let Some(message) = extract_ns_error_message(&v) {
+                    warn!("Launch failed: {message}");
+                    return IdeviceError::InternalError(message);
+                }
+                warn!("PID wasn't parseable: {v:?}");
+                IdeviceError::UnexpectedResponse("unexpected response".into())
+            }),
+            _ => {
+                warn!("Did not get integer response from launchSuspendedProcess");
+                Err(IdeviceError::UnexpectedResponse(
+                    "unexpected response".into(),
                 ))
             }
         }
@@ -185,18 +306,16 @@ impl<'a, R: ReadWrite> ProcessControlClient<'a, R> {
     ///
     /// # Errors
     /// * `IdeviceError::DisableMemoryLimitFailed` if device reports failure
-    /// * `IdeviceError::UnexpectedResponse` for invalid responses
+    /// * `IdeviceError::UnexpectedResponse("unexpected response".into())` for invalid responses
     /// * Other communication errors
     pub async fn disable_memory_limit(&mut self, pid: u64) -> Result<(), IdeviceError> {
-        self.channel
-            .call_method(
+        let res = self
+            .channel
+            .call_method_with_reply(
                 "requestDisableMemoryLimitsForPid:".into(),
                 Some(vec![AuxValue::U32(pid as u32)]),
-                true,
             )
             .await?;
-
-        let res = self.channel.read_message().await?;
         match res.data {
             Some(Value::Boolean(b)) => {
                 if b {

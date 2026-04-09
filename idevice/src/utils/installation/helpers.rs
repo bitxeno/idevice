@@ -277,8 +277,13 @@ async fn upload_dir_to_public_staging<P: AsRef<Path>>(
     ensure_public_staging(&mut afc).await?;
 
     let file = file.as_ref();
+    let remote_folder_name = file
+        .iter()
+        .next_back()
+        .map(|x| x.to_string_lossy().to_string())
+        .unwrap_or(IPA_REMOTE_FILE.to_string());
 
-    let remote_path = format!("{PUBLIC_STAGING}/{IPA_REMOTE_FILE}");
+    let remote_path = format!("{PUBLIC_STAGING}/{remote_folder_name}");
 
     let _ = afc.remove_all(&remote_path).await;
     afc_upload_dir(&mut afc, file, &remote_path).await?;

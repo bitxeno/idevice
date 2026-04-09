@@ -59,6 +59,7 @@
 //! # }
 
 use plist::Value;
+use std::io::{Cursor, Read};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::errors::DvtError;
@@ -84,7 +85,7 @@ pub struct MessageHeader {
     /// Conversation tracking index
     conversation_index: u32,
     /// Channel number this message belongs to
-    pub channel: u32,
+    pub channel: i32,
     /// Whether a reply is expected
     expects_reply: bool,
 }
@@ -94,12 +95,20 @@ pub struct MessageHeader {
 /// 16-byte structure following the message header
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct PayloadHeader {
-    /// Flags controlling message processing
-    flags: u32,
+    /// DTX message type (DISPATCH/OBJECT/OK/ERROR/DATA)
+    msg_type: u8,
+    /// Reserved bytes in the wire format
+    flags_a: u8,
+    /// Reserved bytes in the wire format
+    flags_b: u8,
+    /// Reserved byte in the wire format
+    reserved: u8,
     /// Length of auxiliary data section
     aux_length: u32,
     /// Total length of payload (aux + data)
-    total_length: u64,
+    total_length: u32,
+    /// Additional payload flags
+    flags: u32,
 }
 
 /// Header for auxiliary data section
@@ -120,7 +129,7 @@ pub struct AuxHeader {
 /// Auxiliary data container
 ///
 /// Contains a header and a collection of typed values
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Aux {
     /// Auxiliary data header
     pub header: AuxHeader,
@@ -129,7 +138,7 @@ pub struct Aux {
 }
 
 /// Typed auxiliary value that can be included in messages
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum AuxValue {
     /// NULL value (type 0x0a) - no payload bytes
     Null,
@@ -148,7 +157,7 @@ pub enum AuxValue {
 }
 
 /// Complete protocol message
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Message {
     /// Message metadata header
     pub message_header: MessageHeader,
@@ -163,109 +172,153 @@ pub struct Message {
 }
 
 impl Aux {
-    /// Parses auxiliary data from bytes
+    /// Parses the legacy aux wire format used on iOS 16 and earlier
     ///
-    /// # Arguments
-    /// * `bytes` - Raw byte slice containing auxiliary data
+    /// Layout: `[AuxHeader (16 B)][type (4 B)][data...][type (4 B)][data...]...`
     ///
-    /// # Returns
-    /// * `Ok(Aux)` - Parsed auxiliary data
-    /// * `Err(IdeviceError)` - If parsing fails
-    ///
-    /// # Errors
-    /// * `IdeviceError::NotEnoughBytes` if input is too short
-    /// * `IdeviceError::UnknownAuxValueType` for unsupported types
-    /// * `IdeviceError` for other parsing failures
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, IdeviceError> {
+    /// Type 0xF0 entries are `PrimitiveDictionary` blocks embedded inside
+    /// the legacy envelope; their bodies are skipped since the useful values
+    /// are the surrounding flat entries.
+    fn parse_legacy_bytes(bytes: Vec<u8>) -> Result<Self, IdeviceError> {
         if bytes.len() < 16 {
-            return Err(IdeviceError::NotEnoughBytes(bytes.len(), 24));
+            return Err(IdeviceError::NotEnoughBytes(bytes.len(), 16));
         }
 
+        let mut cursor = Cursor::new(bytes.as_slice());
         let header = AuxHeader {
-            buffer_size: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-            unknown: u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
-            aux_size: u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
-            unknown2: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]),
+            buffer_size: Self::read_u32(&mut cursor)?,
+            unknown: Self::read_u32(&mut cursor)?,
+            aux_size: Self::read_u32(&mut cursor)?,
+            unknown2: Self::read_u32(&mut cursor)?,
         };
 
-        let mut bytes = &bytes[16..];
         let mut values = Vec::new();
-        loop {
-            if bytes.len() < 8 {
-                break;
-            }
-            let aux_type = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            bytes = &bytes[4..];
+        while cursor.position() + 4 <= bytes.len() as u64 {
+            let aux_type = Self::read_u32(&mut cursor)?;
             match aux_type {
                 0x0a => {
-                    // null / PNULL - no payload bytes
-                    // used as dictionary keys and separators
+                    // PNULL separator — used as dictionary keys; not a user value.
                 }
-                0x01 => {
-                    let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-                    bytes = &bytes[4..];
-                    if bytes.len() < len {
-                        return Err(IdeviceError::NotEnoughBytes(bytes.len(), len));
+                0x0f0 => {
+                    // PrimitiveDictionary block embedded in a legacy envelope.
+                    // Layout after the type: u32 flags, u64 body_length, [body].
+                    // Skip the entire block; positional args appear as flat entries.
+                    let _flags = Self::read_u32(&mut cursor)?;
+                    let body_len = Self::read_u64(&mut cursor)?;
+                    let pos = cursor.position() as usize;
+                    let end = pos + body_len as usize;
+                    if end > bytes.len() {
+                        return Err(IdeviceError::NotEnoughBytes(bytes.len(), end));
                     }
-                    values.push(AuxValue::String(String::from_utf8(bytes[..len].to_vec())?));
-                    bytes = &bytes[len..];
+                    cursor.set_position(end as u64);
                 }
-                0x02 => {
-                    let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-                    bytes = &bytes[4..];
-                    if bytes.len() < len {
-                        return Err(IdeviceError::NotEnoughBytes(bytes.len(), len));
-                    }
-                    values.push(AuxValue::Array(bytes[..len].to_vec()));
-                    bytes = &bytes[len..];
+                _ => {
+                    // All other types share the same encoding as parse_primitive,
+                    // but the type word is already consumed above so we reconstruct
+                    // a cursor over [type || remaining] to reuse parse_primitive.
+                    let pos = cursor.position() as usize - 4;
+                    let mut sub = Cursor::new(&bytes[pos..]);
+                    values.push(Self::parse_primitive(&mut sub)?);
+                    cursor.set_position(pos as u64 + sub.position());
                 }
-                0x03 => {
-                    values.push(AuxValue::U32(u32::from_le_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3],
-                    ])));
-                    bytes = &bytes[4..];
-                }
-                0x06 => {
-                    if bytes.len() < 8 {
-                        return Err(IdeviceError::NotEnoughBytes(8, bytes.len()));
-                    }
-                    values.push(AuxValue::I64(i64::from_le_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-                        bytes[7],
-                    ])));
-                    bytes = &bytes[8..];
-                }
-                0x09 => {
-                    // Double (f64)
-                    if bytes.len() < 8 {
-                        return Err(IdeviceError::NotEnoughBytes(8, bytes.len()));
-                    }
-                    let bits = u64::from_le_bytes([
-                        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-                        bytes[7],
-                    ]);
-                    values.push(AuxValue::Double(f64::from_bits(bits)));
-                    bytes = &bytes[8..];
-                }
-                0xf0 => {
-                    // PrimitiveDictionary
-                    // Layout: u32 magic, u32 unknown, u64 body_length, then [key,value] pairs
-                    if bytes.len() < 16 {
-                        return Err(IdeviceError::NotEnoughBytes(16, bytes.len()));
-                    }
-                    // Skip magic (4), unknown (4), body_length (8)
-                    let body_length = u64::from_le_bytes([
-                        bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10],
-                        bytes[11],
-                    ]) as usize;
-                    // Skip the dictionary body content
-                    bytes = &bytes[16 + body_length..];
-                }
-                _ => return Err(DvtError::UnknownAuxValueType(aux_type).into()),
             }
         }
 
         Ok(Self { header, values })
+    }
+
+    fn read_u32(cursor: &mut Cursor<&[u8]>) -> Result<u32, IdeviceError> {
+        let mut buf = [0u8; 4];
+        Read::read_exact(cursor, &mut buf)?;
+        Ok(u32::from_le_bytes(buf))
+    }
+
+    fn read_u64(cursor: &mut Cursor<&[u8]>) -> Result<u64, IdeviceError> {
+        let mut buf = [0u8; 8];
+        Read::read_exact(cursor, &mut buf)?;
+        Ok(u64::from_le_bytes(buf))
+    }
+
+    fn read_f64(cursor: &mut Cursor<&[u8]>) -> Result<f64, IdeviceError> {
+        let mut buf = [0u8; 8];
+        Read::read_exact(cursor, &mut buf)?;
+        Ok(f64::from_le_bytes(buf))
+    }
+
+    fn read_exact_vec(cursor: &mut Cursor<&[u8]>, len: usize) -> Result<Vec<u8>, IdeviceError> {
+        let mut buf = vec![0u8; len];
+        Read::read_exact(cursor, &mut buf)?;
+        Ok(buf)
+    }
+
+    fn parse_primitive(cursor: &mut Cursor<&[u8]>) -> Result<AuxValue, IdeviceError> {
+        let raw_type = Self::read_u32(cursor)?;
+        let type_code = raw_type & 0xFF;
+        match type_code {
+            0x01 => {
+                let len = Self::read_u32(cursor)? as usize;
+                Ok(AuxValue::String(String::from_utf8(Self::read_exact_vec(
+                    cursor, len,
+                )?)?))
+            }
+            0x02 => {
+                let len = Self::read_u32(cursor)? as usize;
+                Ok(AuxValue::Array(Self::read_exact_vec(cursor, len)?))
+            }
+            0x03 => Ok(AuxValue::U32(Self::read_u32(cursor)?)),
+            0x06 => Ok(AuxValue::I64(Self::read_u64(cursor)? as i64)),
+            0x09 => Ok(AuxValue::Double(Self::read_f64(cursor)?)),
+            0x0A => Ok(AuxValue::Null),
+            _ => Err(DvtError::UnknownAuxValueType(raw_type).into()),
+        }
+    }
+
+    /// Parses auxiliary data from bytes, selecting the correct wire format
+    /// based on the leading magic byte.
+    ///
+    /// # Wire formats
+    ///
+    /// **Legacy**: the first byte is NOT `0xF0`.
+    /// The buffer begins with a 16-byte `AuxHeader` followed by flat
+    /// type-tagged value entries.
+    ///
+    /// **Modern** (iOS 17+, RSD/testmanagerd path): the first byte IS `0xF0`,
+    /// indicating the entire buffer is a single `PrimitiveDictionary` block
+    /// (`[flags(4B)][unknown(4B)][body_len(8B)][key-value pairs...]`).
+    /// Keys are positional-null sentinels; only the values are collected.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, IdeviceError> {
+        if bytes.is_empty() {
+            return Ok(Self::from_values(Vec::new()));
+        }
+
+        if (bytes[0] as u32) != 0xF0 {
+            return Self::parse_legacy_bytes(bytes);
+        }
+
+        if bytes.len() < 16 {
+            return Err(IdeviceError::NotEnoughBytes(bytes.len(), 16));
+        }
+
+        let mut cursor = Cursor::new(bytes.as_slice());
+        let _type_and_flags = Self::read_u32(&mut cursor)?;
+        let _unknown_flags = Self::read_u32(&mut cursor)?;
+        let body_len = Self::read_u64(&mut cursor)?;
+        let body_end = 16u64 + body_len;
+        if body_end > bytes.len() as u64 {
+            return Err(IdeviceError::NotEnoughBytes(bytes.len(), body_end as usize));
+        }
+
+        let mut values = Vec::new();
+        while cursor.position() < body_end {
+            let _key = Self::parse_primitive(&mut cursor)?;
+            let value = Self::parse_primitive(&mut cursor)?;
+            values.push(value);
+        }
+
+        Ok(Self {
+            header: AuxHeader::default(),
+            values,
+        })
     }
 
     /// Creates new auxiliary data from values
@@ -444,7 +497,7 @@ impl MessageHeader {
         fragment_count: u16,
         identifier: u32,
         conversation_index: u32,
-        channel: u32,
+        channel: i32,
         expects_reply: bool,
     ) -> Self {
         Self {
@@ -458,6 +511,21 @@ impl MessageHeader {
             channel,
             expects_reply,
         }
+    }
+
+    /// Returns the unique message identifier.
+    pub(crate) fn identifier(&self) -> u32 {
+        self.identifier
+    }
+
+    /// Returns the conversation index for this message.
+    pub(crate) fn conversation_index(&self) -> u32 {
+        self.conversation_index
+    }
+
+    /// Returns whether this message expects a reply.
+    pub(crate) fn expects_reply(&self) -> bool {
+        self.expects_reply
     }
 
     /// Serializes header to bytes
@@ -485,10 +553,10 @@ impl PayloadHeader {
 
     /// Serializes header to bytes
     pub fn serialize(&self) -> Vec<u8> {
-        let mut res = Vec::new();
-        res.extend_from_slice(&self.flags.to_le_bytes());
+        let mut res = vec![self.msg_type, self.flags_a, self.flags_b, self.reserved];
         res.extend_from_slice(&self.aux_length.to_le_bytes());
         res.extend_from_slice(&self.total_length.to_le_bytes());
+        res.extend_from_slice(&self.flags.to_le_bytes());
 
         res
     }
@@ -496,14 +564,9 @@ impl PayloadHeader {
     /// Creates header for method invocation messages
     pub fn method_invocation() -> Self {
         Self {
-            flags: 2,
+            msg_type: 2,
             ..Default::default()
         }
-    }
-
-    /// Updates flags to indicate reply expectation
-    pub fn apply_expects_reply_map(&mut self) {
-        self.flags |= 0x1000
     }
 }
 
@@ -533,9 +596,16 @@ impl Message {
                 length: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
                 identifier: u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]),
                 conversation_index: u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]),
-                //treat both as the negative and positive representation of the channel code in the response
-                // the same when performing fragmentation
-                channel: i32::abs(i32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]])) as u32,
+                channel: {
+                    let wire_channel = i32::from_le_bytes([buf[24], buf[25], buf[26], buf[27]]);
+                    let conversation_index =
+                        u32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]);
+                    if conversation_index.is_multiple_of(2) {
+                        -wire_channel
+                    } else {
+                        wire_channel
+                    }
+                },
                 expects_reply: u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]) == 1,
             };
             if header.fragment_count > 1 && header.fragment_id == 0 {
@@ -552,11 +622,13 @@ impl Message {
         // read the payload header
         let buf = &packet_data[0..16];
         let pheader = PayloadHeader {
-            flags: u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
+            msg_type: buf[0],
+            flags_a: buf[1],
+            flags_b: buf[2],
+            reserved: buf[3],
             aux_length: u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
-            total_length: u64::from_le_bytes([
-                buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15],
-            ]),
+            total_length: u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
+            flags: u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
         };
         let aux = if pheader.aux_length > 0 {
             let buf = packet_data[16..(16 + pheader.aux_length as usize)].to_vec();
@@ -565,7 +637,7 @@ impl Message {
             None
         };
         // read the data
-        let need_len = (pheader.total_length - pheader.aux_length as u64) as usize;
+        let need_len = (pheader.total_length - pheader.aux_length) as usize;
         let buf = packet_data
             [(pheader.aux_length + 16) as usize..pheader.aux_length as usize + 16 + need_len]
             .to_vec();
@@ -631,7 +703,7 @@ impl Message {
         // Update the payload header
         let mut payload_header = self.payload_header.to_owned();
         payload_header.aux_length = aux.len() as u32;
-        payload_header.total_length = (aux.len() + data.len()) as u64;
+        payload_header.total_length = (aux.len() + data.len()) as u32;
         let payload_header = payload_header.serialize();
 
         // Update the message header
@@ -645,6 +717,65 @@ impl Message {
         res.extend_from_slice(&data);
 
         res
+    }
+
+    /// Builds a raw reply frame for an incoming message, sending `data_bytes`
+    /// verbatim as the payload without additional NSKeyedArchive encoding.
+    ///
+    /// This is used for replies where the payload is already a serialised
+    /// NSKeyedArchive (e.g. `XCTestConfiguration`).  Pass an empty slice to
+    /// send an acknowledgement with no payload.
+    pub(crate) fn build_raw_reply(
+        channel: i32,
+        incoming_msg_id: u32,
+        incoming_conversation_index: u32,
+        data_bytes: &[u8],
+    ) -> Vec<u8> {
+        // Payload header (16 bytes): flags=0, aux_len=0, total_len
+        let msg_type: u8 = if data_bytes.is_empty() { 0 } else { 3 };
+        let flags_a: u8 = 0;
+        let flags_b: u8 = 0;
+        let reserved: u8 = 0;
+        let aux_len: u32 = 0;
+        let total_len: u32 = data_bytes.len() as u32;
+
+        let payload_total = 16usize + data_bytes.len(); // payload_hdr + data
+
+        // Message header (32 bytes)
+        let magic: u32 = 0x1F3D5B79;
+        let header_len: u32 = 32;
+        let fragment_id: u16 = 0;
+        let fragment_count: u16 = 1;
+        let length: u32 = payload_total as u32;
+        let conversation_index = incoming_conversation_index + 1;
+        let expects_reply: u32 = 0;
+        let wire_channel = if conversation_index.is_multiple_of(2) {
+            channel
+        } else {
+            -channel
+        };
+
+        let mut buf = Vec::with_capacity(32 + 16 + data_bytes.len());
+        buf.extend_from_slice(&magic.to_le_bytes());
+        buf.extend_from_slice(&header_len.to_le_bytes());
+        buf.extend_from_slice(&fragment_id.to_le_bytes());
+        buf.extend_from_slice(&fragment_count.to_le_bytes());
+        buf.extend_from_slice(&length.to_le_bytes());
+        buf.extend_from_slice(&incoming_msg_id.to_le_bytes());
+        buf.extend_from_slice(&conversation_index.to_le_bytes());
+        buf.extend_from_slice(&wire_channel.to_le_bytes());
+        buf.extend_from_slice(&expects_reply.to_le_bytes());
+        // Payload header
+        buf.push(msg_type);
+        buf.push(flags_a);
+        buf.push(flags_b);
+        buf.push(reserved);
+        buf.extend_from_slice(&aux_len.to_le_bytes());
+        buf.extend_from_slice(&total_len.to_le_bytes());
+        buf.extend_from_slice(&0_u32.to_le_bytes());
+        // Data
+        buf.extend_from_slice(data_bytes);
+        buf
     }
 }
 
