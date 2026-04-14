@@ -14,11 +14,13 @@
 mod helpers;
 use std::path::Path;
 
-use helpers::{InstallPackage, prepare_dir_upload, prepare_file_upload};
+use helpers::{
+    InstallPackage, prepare_dir_upload, prepare_dir_upload_rsd, prepare_file_upload,
+    prepare_file_upload_rsd,
+};
 
 use crate::{
-    IdeviceError, IdeviceService, provider::IdeviceProvider,
-    services::installation_proxy::InstallationProxyClient,
+    IdeviceError, IdeviceService, RsdService, provider::{IdeviceProvider, RsdProvider}, rsd, services::installation_proxy::InstallationProxyClient
 };
 
 /// Install an application by first uploading the local package and then invoking InstallationProxy.
@@ -60,6 +62,37 @@ where
     } else {
         let data = tokio::fs::read(&local_path).await?;
         install_bytes_with_callback(provider, data, options, callback, state).await
+    }
+}
+
+/// Same as `install_package` but providing a callback that receives `(percent_complete, state)`
+/// updates while InstallationProxy performs the operation.
+pub async fn install_package_with_callback_rsd<P: AsRef<Path>, Fut, S>(
+    provider: &mut impl RsdProvider,
+    handshake: &mut rsd::RsdHandshake,
+    local_path: P,
+    options: Option<plist::Value>,
+    callback: impl Fn((u64, S)) -> Fut,
+    state: S,
+) -> Result<(), IdeviceError>
+where
+    Fut: std::future::Future<Output = ()>,
+    S: Clone,
+{
+    let metadata = tokio::fs::metadata(&local_path).await?;
+
+    if metadata.is_dir() {
+        let InstallPackage {
+            remote_package_path,
+            options,
+        } = prepare_dir_upload_rsd(provider, handshake, local_path, options).await?;
+        let mut inst = InstallationProxyClient::connect_rsd(provider, handshake).await?;
+
+        inst.upgrade_with_callback(remote_package_path, Some(options), callback, state)
+            .await
+    } else {
+        let data = tokio::fs::read(&local_path).await?;
+        install_bytes_with_callback_rsd(provider, handshake, data, options, callback, state).await
     }
 }
 
@@ -140,6 +173,34 @@ where
         options,
     } = prepare_file_upload(provider, data, options).await?;
     let mut inst = InstallationProxyClient::connect(provider).await?;
+
+    inst.install_with_callback(remote_package_path, Some(options), callback, state)
+        .await
+}
+
+/// Same as `install_bytes` but providing a callback that receives `(percent_complete, state)`
+/// updates while InstallationProxy performs the install operation.
+///
+/// Tip:
+/// - When embedding assets into the binary, you can pass `include_bytes!("path/to/app.ipa")`
+///   as the `data` argument and choose a desired `remote_name` (e.g. `"MyApp.ipa"`).
+pub async fn install_bytes_with_callback_rsd<Fut, S>(
+    provider: &mut impl RsdProvider,
+    handshake: &mut rsd::RsdHandshake,
+    data: impl AsRef<[u8]>,
+    options: Option<plist::Value>,
+    callback: impl Fn((u64, S)) -> Fut,
+    state: S,
+) -> Result<(), IdeviceError>
+where
+    Fut: std::future::Future<Output = ()>,
+    S: Clone,
+{
+    let InstallPackage {
+        remote_package_path,
+        options,
+    } = prepare_file_upload_rsd(provider, handshake, data, options).await?;
+    let mut inst = InstallationProxyClient::connect_rsd(provider, handshake).await?;
 
     inst.install_with_callback(remote_package_path, Some(options), callback, state)
         .await
