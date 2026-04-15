@@ -108,6 +108,47 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
         Ok(())
     }
 
+    /// Create a remote pairing TCP tunnel and perform an RSD handshake over it.
+    ///
+    /// `tunnel_addr` should be the device's remote pairing address. Its port is
+    /// ignored and replaced with the listener port returned by `create_tcp_listener`.
+    ///
+    /// Returns a TCP stack handle (which implements `RsdProvider`) and the initial
+    /// `RsdHandshake`.
+    pub async fn tunnel_connect(
+        &mut self,
+        host_name: &str,
+    ) -> Result<(crate::tcp::handle::AdapterHandle, crate::rsd::RsdHandshake), IdeviceError> {
+        self.attempt_pair_verify().await.expect("no paired");
+        self.validate_pairing().await.expect("no paired");
+        
+        let listener_port = self.create_tcp_listener().await?;
+
+        let tunnel_stream = tokio::net::TcpStream::connect((host_name, listener_port)).await?;
+        let tunnel = connect_tls_psk_tunnel_native(tunnel_stream, self.encryption_key()).await?;
+
+        let mtu = tunnel.info.mtu as usize;
+        let rsd_port = tunnel.info.server_rsd_port;
+        if rsd_port == 0 {
+            return Err(IdeviceError::UnexpectedResponse(
+                "missing RSD port in tunnel info".into(),
+            ));
+        }
+
+        let client_ip: std::net::IpAddr = tunnel.info.client_address.parse()?;
+        let server_ip: std::net::IpAddr = tunnel.info.server_address.parse()?;
+
+        let raw_stream = tunnel.into_inner();
+        let mut adapter = crate::tcp::adapter::Adapter::new(Box::new(raw_stream), client_ip, server_ip);
+        adapter.set_mss(mtu.saturating_sub(60)); // TODO: mtu minus IPv6 + TCP header sizes; need to confirm if these are always the header sizes
+        let mut handle = adapter.to_async_handle();
+
+        let rsd_stream = handle.connect(rsd_port).await?;
+        let handshake = crate::rsd::RsdHandshake::new(rsd_stream).await?;
+
+        Ok((handle, handshake))
+    }
+
     pub async fn validate_pairing(&mut self) -> Result<(), IdeviceError> {
         let x_private_key = EphemeralSecret::random_from_rng(OsRng);
         let x_public_key = X25519PublicKey::from(&x_private_key);
