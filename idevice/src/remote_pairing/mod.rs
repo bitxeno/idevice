@@ -523,11 +523,19 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
         rand::rng().fill_bytes(&mut a_private);
 
         let a_public = client.compute_public_ephemeral(&a_private);
+        let pin_bytes = pin.as_bytes();
+        if pin_bytes.len() < 6 {
+            warn!("PIN is too short for SRP setup: {}", pin_bytes.len());
+            return Err(RemotePairingError::PairingRejected(
+                "PIN must contain at least 6 characters".into(),
+            )
+            .into());
+        }
 
         let verifier = match client.process_reply(
             &a_private,
             "Pair-Setup".as_bytes(),
-            &pin.as_bytes()[..6],
+            &pin_bytes[..6],
             salt,
             public_key,
             false,
