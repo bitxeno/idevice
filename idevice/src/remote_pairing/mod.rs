@@ -119,8 +119,8 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
         &mut self,
         host_name: &str,
     ) -> Result<(crate::tcp::handle::AdapterHandle, crate::rsd::RsdHandshake), IdeviceError> {
-        self.attempt_pair_verify().await.expect("no paired");
-        self.validate_pairing().await.expect("no paired");
+        self.attempt_pair_verify().await?;
+        self.validate_pairing().await?;
         
         let listener_port = self.create_tcp_listener().await?;
 
