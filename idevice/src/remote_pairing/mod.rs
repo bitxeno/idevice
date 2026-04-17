@@ -115,7 +115,7 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
     ///
     /// Returns a TCP stack handle (which implements `RsdProvider`) and the initial
     /// `RsdHandshake`.
-    pub async fn tunnel_connect(
+    pub async fn start_tunnel(
         &mut self,
         host_name: &str,
     ) -> Result<(crate::tcp::handle::AdapterHandle, crate::rsd::RsdHandshake), IdeviceError> {
