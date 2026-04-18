@@ -450,6 +450,8 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
         let key = self.init_srp_context(&salt, &public_key, &pin).await?;
         let tlv = self.save_pair_record_on_peer(&key).await?;
         let peer_device = parse_peer_device_from_tlv(&tlv)?;
+
+        self.pairing_file.alt_irk = peer_device.alt_irk.clone().expect("missing alt_irk");
         self.peer_device = Some(peer_device);
 
         Ok(())
