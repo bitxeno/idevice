@@ -38,6 +38,57 @@ pub use tunnel::{CdTunnel, TunnelInfo, connect_tls_psk_tunnel_native};
 const RPPAIRING_MAGIC: &[u8] = b"RPPairing";
 const WIRE_PROTOCOL_VERSION: u8 = 19;
 
+#[derive(Debug, Clone, Default)]
+pub struct PeerDevice {
+    pub account_id: Option<String>,
+    pub alt_irk: Option<Vec<u8>>,
+    pub bt_addr: Option<String>,
+    pub model: Option<String>,
+    pub name: Option<String>,
+    pub remotepairing_udid: Option<String>,
+    pub remotepairing_serial_number: Option<String>,
+    pub remotepairing_ecid: Option<u64>,
+}
+
+impl PeerDevice {
+    fn from_info_dictionary(dict: &plist::Dictionary) -> Self {
+        Self {
+            account_id: dict
+                .get("accountID")
+                .and_then(|v| v.as_string())
+                .map(str::to_string),
+            alt_irk: dict
+                .get("altIRK")
+                .and_then(|v| v.as_data())
+                .map(|v| v.to_vec()),
+            bt_addr: dict
+                .get("btAddr")
+                .and_then(|v| v.as_string())
+                .map(str::to_string),
+            model: dict
+                .get("model")
+                .and_then(|v| v.as_string())
+                .map(str::to_string),
+            name: dict
+                .get("name")
+                .and_then(|v| v.as_string())
+                .map(str::to_string),
+            remotepairing_udid: dict
+                .get("remotepairing_udid")
+                .and_then(|v| v.as_string())
+                .map(str::to_string),
+            remotepairing_serial_number: dict
+                .get("remotepairing_serial_number")
+                .and_then(|v| v.as_string())
+                .map(str::to_string),
+            remotepairing_ecid: dict
+                .get("remotepairing_ecid")
+                .and_then(|v| v.as_unsigned_integer())
+                .map(|v| v as u64),
+        }
+    }
+}
+
 pub struct RemotePairingClient<'a, R: RpPairingSocketProvider> {
     inner: R,
     sequence_number: usize,
@@ -51,6 +102,8 @@ pub struct RemotePairingClient<'a, R: RpPairingSocketProvider> {
 
     client_cipher: ChaCha20Poly1305,
     server_cipher: ChaCha20Poly1305,
+
+    peer_device: Option<PeerDevice>,
 }
 
 impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
@@ -69,6 +122,7 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
             encryption_key: initial_key,
             client_cipher,
             server_cipher,
+            peer_device: None,
         }
     }
 
@@ -108,23 +162,29 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
         Ok(())
     }
 
+    /// Returns information about the paired peer device. Will return an error if not paired yet.
+    pub fn peer_device(&self) -> Result<&PeerDevice, IdeviceError> {
+        self.peer_device.as_ref().ok_or(IdeviceError::UnexpectedResponse(
+            "peer device is unavailable; call pair() first".into(),
+        ))
+    }
+
     /// Create a remote pairing TCP tunnel and perform an RSD handshake over it.
     ///
-    /// `tunnel_addr` should be the device's remote pairing address. Its port is
-    /// ignored and replaced with the listener port returned by `create_tcp_listener`.
+    /// `tunnel_host` is the hostname or IP address to which the tunnel should connect. 
     ///
     /// Returns a TCP stack handle (which implements `RsdProvider`) and the initial
     /// `RsdHandshake`.
     pub async fn start_tunnel(
         &mut self,
-        host_name: &str,
+        tunnel_host: &str,
     ) -> Result<(crate::tcp::handle::AdapterHandle, crate::rsd::RsdHandshake), IdeviceError> {
         self.attempt_pair_verify().await?;
         self.validate_pairing().await?;
         
         let listener_port = self.create_tcp_listener().await?;
 
-        let tunnel_stream = tokio::net::TcpStream::connect((host_name, listener_port)).await?;
+        let tunnel_stream = tokio::net::TcpStream::connect((tunnel_host, listener_port)).await?;
         let tunnel = connect_tls_psk_tunnel_native(tunnel_stream, self.encryption_key()).await?;
         println!("Tunnel established!");
         println!("  Client address: {}", tunnel.info.client_address);
@@ -145,7 +205,7 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
 
         let raw_stream = tunnel.into_inner();
         let mut adapter = crate::tcp::adapter::Adapter::new(Box::new(raw_stream), client_ip, server_ip);
-        adapter.set_mss(mtu.saturating_sub(60)); // TODO: mtu minus IPv6 + TCP header sizes; need to confirm if these are always the header sizes
+        adapter.set_mss(mtu.saturating_sub(60));
         let mut handle = adapter.to_async_handle();
 
         let rsd_stream = handle.connect(rsd_port).await?;
@@ -390,7 +450,41 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
     {
         let (salt, public_key, pin) = self.request_pair_consent(pin_callback, state).await?;
         let key = self.init_srp_context(&salt, &public_key, &pin).await?;
-        self.save_pair_record_on_peer(&key).await?;
+        let tlv = self.save_pair_record_on_peer(&key).await?;
+
+        let mut info = Vec::new();
+        for entry in &tlv {
+            match entry.tlv_type {
+                tlv::PairingDataComponentType::Info => info.extend_from_slice(&entry.data),
+                tlv::PairingDataComponentType::ErrorResponse => {
+                    return Err(IdeviceError::UnexpectedResponse(
+                        "TLV error response in pair record save".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        if info.is_empty() {
+            return Err(IdeviceError::UnexpectedResponse(
+                "missing peer info in pair record response".into(),
+            ));
+        }
+
+        let info_plist = opack::opack_to_plist(&info).map_err(|e| {
+            IdeviceError::UnexpectedResponse(
+                format!("failed to parse OPACK peer info from pair record response: {e}").into(),
+            )
+        })?;
+
+        let info_dict = info_plist
+            .as_dictionary()
+            .ok_or(IdeviceError::UnexpectedResponse(
+                "peer info OPACK payload is not a dictionary".into(),
+            ))?;
+
+        let peer_device = PeerDevice::from_info_dictionary(info_dict);
+        self.peer_device = Some(peer_device);
 
         Ok(())
     }
