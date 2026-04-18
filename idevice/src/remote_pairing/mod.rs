@@ -123,8 +123,8 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
     }
 
     /// Returns the identifier of the paired peer device. Will return an error if not paired yet.
-    pub fn peer_identifier(&self) -> Result<&str, IdeviceError> {
-        self.peer_identifier.as_deref().ok_or(IdeviceError::UnexpectedResponse(
+    pub fn peer_identifier(&self) -> Result<String, IdeviceError> {
+        self.peer_identifier.clone().ok_or(IdeviceError::UnexpectedResponse(
             "peer identifier is unavailable; call pair() first".into(),
         ))
     }
