@@ -146,11 +146,11 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
 
         let tunnel_stream = tokio::net::TcpStream::connect((tunnel_host, listener_port)).await?;
         let tunnel = connect_tls_psk_tunnel_native(tunnel_stream, self.encryption_key()).await?;
-        println!("Tunnel established!");
-        println!("  Client address: {}", tunnel.info.client_address);
-        println!("  Server address: {}", tunnel.info.server_address);
-        println!("  MTU: {}", tunnel.info.mtu);
-        println!("  RSD port: {}", tunnel.info.server_rsd_port);
+        debug!("Tunnel established!");
+        debug!("  Client address: {}", tunnel.info.client_address);
+        debug!("  Server address: {}", tunnel.info.server_address);
+        debug!("  MTU: {}", tunnel.info.mtu);
+        debug!("  RSD port: {}", tunnel.info.server_rsd_port);
 
         let mtu = tunnel.info.mtu as usize;
         let rsd_port = tunnel.info.server_rsd_port;
