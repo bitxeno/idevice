@@ -1,12 +1,14 @@
 // Jackson Coxson
 
 use std::path::Path;
+use std::hash::Hasher;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use plist::Dictionary;
 use plist_macro::plist_to_xml_bytes;
 use rsa::rand_core::OsRng;
 use serde::de::Error;
+use siphasher::sip::SipHasher;
 use tracing::{debug, warn};
 
 use crate::IdeviceError;
@@ -33,6 +35,49 @@ impl RpPairingFile {
     /// Returns the identifier string.
     pub fn identifier(&self) -> &str {
         &self.identifier
+    }
+
+    /// Validates an mDNS `authTag` against this pairing file's `alt_irk`.
+    ///
+    /// Algorithm mirrors Frida's `find_peer_matching_service`:
+    /// - SipHash keyed by `alt_irk` (16 bytes)
+    /// - Input is service `identifier` bytes
+    /// - Output is 8 bytes; expected auth tag is first 6 bytes in reverse order
+    pub fn validate_auth_tag(&self, identifier: &str, auth_tag: &[u8]) -> bool {
+        if self.alt_irk.len() != 16 {
+            warn!(
+                alt_irk_len = self.alt_irk.len(),
+                "invalid alt_irk length for auth_tag validation"
+            );
+            return false;
+        }
+
+        if auth_tag.len() != 6 {
+            warn!(
+                auth_tag_len = auth_tag.len(),
+                "invalid auth_tag length for validation"
+            );
+            return false;
+        }
+
+        let mut k0_bytes = [0u8; 8];
+        let mut k1_bytes = [0u8; 8];
+        k0_bytes.copy_from_slice(&self.alt_irk[..8]);
+        k1_bytes.copy_from_slice(&self.alt_irk[8..16]);
+
+        let mut sip = SipHasher::new_with_keys(
+            u64::from_le_bytes(k0_bytes),
+            u64::from_le_bytes(k1_bytes),
+        );
+        sip.write(identifier.as_bytes());
+        let output = sip.finish().to_le_bytes();
+
+        let mut expected_tag = [0u8; 6];
+        for i in 0..expected_tag.len() {
+            expected_tag[i] = output[5 - i];
+        }
+
+        auth_tag == expected_tag.as_slice()
     }
 
     pub fn generate(sending_host: &str) -> Self {
