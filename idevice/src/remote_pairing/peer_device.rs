@@ -6,12 +6,9 @@ use super::{opack, tlv};
 pub struct PeerDevice {
     pub account_id: Option<String>,
     pub alt_irk: Option<Vec<u8>>,
-    pub bt_addr: Option<String>,
     pub model: Option<String>,
     pub name: Option<String>,
     pub remotepairing_udid: Option<String>,
-    pub remotepairing_serial_number: Option<String>,
-    pub remotepairing_ecid: Option<u64>,
 }
 
 impl PeerDevice {
@@ -25,10 +22,6 @@ impl PeerDevice {
                 .get("altIRK")
                 .and_then(|v| v.as_data())
                 .map(|v| v.to_vec()),
-            bt_addr: dict
-                .get("btAddr")
-                .and_then(|v| v.as_string())
-                .map(str::to_string),
             model: dict
                 .get("model")
                 .and_then(|v| v.as_string())
@@ -41,14 +34,6 @@ impl PeerDevice {
                 .get("remotepairing_udid")
                 .and_then(|v| v.as_string())
                 .map(str::to_string),
-            remotepairing_serial_number: dict
-                .get("remotepairing_serial_number")
-                .and_then(|v| v.as_string())
-                .map(str::to_string),
-            remotepairing_ecid: dict
-                .get("remotepairing_ecid")
-                .and_then(|v| v.as_unsigned_integer())
-                .map(|v| v as u64),
         }
     }
 }
