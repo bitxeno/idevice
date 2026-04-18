@@ -22,6 +22,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 pub mod errors;
 mod opack;
+mod peer_device;
 mod rp_pairing_file;
 mod socket;
 pub mod tls_psk;
@@ -29,6 +30,7 @@ mod tlv;
 pub mod tunnel;
 
 // export
+pub use peer_device::{parse_info_dictionary_from_tlv, parse_peer_device_from_tlv, PeerDevice};
 pub use rp_pairing_file::RpPairingFile;
 pub use socket::{RpPairingSocket, RpPairingSocketProvider};
 #[cfg(feature = "openssl")]
@@ -37,57 +39,6 @@ pub use tunnel::{CdTunnel, TunnelInfo, connect_tls_psk_tunnel_native};
 
 const RPPAIRING_MAGIC: &[u8] = b"RPPairing";
 const WIRE_PROTOCOL_VERSION: u8 = 19;
-
-#[derive(Debug, Clone, Default)]
-pub struct PeerDevice {
-    pub account_id: Option<String>,
-    pub alt_irk: Option<Vec<u8>>,
-    pub bt_addr: Option<String>,
-    pub model: Option<String>,
-    pub name: Option<String>,
-    pub remotepairing_udid: Option<String>,
-    pub remotepairing_serial_number: Option<String>,
-    pub remotepairing_ecid: Option<u64>,
-}
-
-impl PeerDevice {
-    fn from_info_dictionary(dict: &plist::Dictionary) -> Self {
-        Self {
-            account_id: dict
-                .get("accountID")
-                .and_then(|v| v.as_string())
-                .map(str::to_string),
-            alt_irk: dict
-                .get("altIRK")
-                .and_then(|v| v.as_data())
-                .map(|v| v.to_vec()),
-            bt_addr: dict
-                .get("btAddr")
-                .and_then(|v| v.as_string())
-                .map(str::to_string),
-            model: dict
-                .get("model")
-                .and_then(|v| v.as_string())
-                .map(str::to_string),
-            name: dict
-                .get("name")
-                .and_then(|v| v.as_string())
-                .map(str::to_string),
-            remotepairing_udid: dict
-                .get("remotepairing_udid")
-                .and_then(|v| v.as_string())
-                .map(str::to_string),
-            remotepairing_serial_number: dict
-                .get("remotepairing_serial_number")
-                .and_then(|v| v.as_string())
-                .map(str::to_string),
-            remotepairing_ecid: dict
-                .get("remotepairing_ecid")
-                .and_then(|v| v.as_unsigned_integer())
-                .map(|v| v as u64),
-        }
-    }
-}
 
 pub struct RemotePairingClient<'a, R: RpPairingSocketProvider> {
     inner: R,
@@ -451,39 +402,7 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
         let (salt, public_key, pin) = self.request_pair_consent(pin_callback, state).await?;
         let key = self.init_srp_context(&salt, &public_key, &pin).await?;
         let tlv = self.save_pair_record_on_peer(&key).await?;
-
-        let mut info = Vec::new();
-        for entry in &tlv {
-            match entry.tlv_type {
-                tlv::PairingDataComponentType::Info => info.extend_from_slice(&entry.data),
-                tlv::PairingDataComponentType::ErrorResponse => {
-                    return Err(IdeviceError::UnexpectedResponse(
-                        "TLV error response in pair record save".into(),
-                    ));
-                }
-                _ => {}
-            }
-        }
-
-        if info.is_empty() {
-            return Err(IdeviceError::UnexpectedResponse(
-                "missing peer info in pair record response".into(),
-            ));
-        }
-
-        let info_plist = opack::opack_to_plist(&info).map_err(|e| {
-            IdeviceError::UnexpectedResponse(
-                format!("failed to parse OPACK peer info from pair record response: {e}").into(),
-            )
-        })?;
-
-        let info_dict = info_plist
-            .as_dictionary()
-            .ok_or(IdeviceError::UnexpectedResponse(
-                "peer info OPACK payload is not a dictionary".into(),
-            ))?;
-
-        let peer_device = PeerDevice::from_info_dictionary(info_dict);
+        let peer_device = parse_peer_device_from_tlv(&tlv)?;
         self.peer_device = Some(peer_device);
 
         Ok(())
