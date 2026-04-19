@@ -1,7 +1,6 @@
 // Jackson Coxson
 
 use idevice::provider::{IdeviceProvider, TcpProvider, UsbmuxdProvider};
-use std::net::IpAddr;
 use std::os::raw::c_char;
 use std::{ffi::CStr, ptr::null_mut};
 
@@ -35,7 +34,7 @@ pub unsafe extern "C" fn idevice_tcp_provider_new(
     provider: *mut *mut IdeviceProviderHandle,
 ) -> *mut IdeviceFfiError {
     let ip = ip as *const SockAddr;
-    let addr: IpAddr = match util::c_addr_to_rust(ip) {
+    let (addr, scope_id) = match util::c_addr_to_rust(ip) {
         Ok(i) => i,
         Err(e) => return ffi_err!(e),
     };
@@ -50,6 +49,7 @@ pub unsafe extern "C" fn idevice_tcp_provider_new(
 
     let t = TcpProvider {
         addr,
+        scope_id,
         pairing_file: pairing_file.0,
         label,
     };

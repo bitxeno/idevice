@@ -69,6 +69,9 @@ obfstr = { version = "0.4", optional = true }
 
 async_zip = { version = "0.0.18", optional = true }
 
+[target.'cfg(not(windows))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full"] }
 tun-rs = { version = "2.0.8", features = ["async_tokio"] }
@@ -108,7 +111,16 @@ installation_proxy = [
   "tokio/fs",
 ]
 installcoordination_proxy = []
-xctest = ["dvt", "installation_proxy", "afc", "dep:uuid", "dep:ns-keyed-archive", "tunnel_tcp_stack", "rsd", "core_device_proxy"]
+xctest = [
+  "dvt",
+  "installation_proxy",
+  "afc",
+  "dep:uuid",
+  "dep:ns-keyed-archive",
+  "tunnel_tcp_stack",
+  "rsd",
+  "core_device_proxy",
+]
 springboardservices = []
 misagent = []
 mobile_image_mounter = ["dep:sha2"]

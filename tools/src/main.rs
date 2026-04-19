@@ -330,7 +330,16 @@ async fn get_provider(
     } else if let Some(host) = host
         && let Some(pairing_file) = pairing_file
     {
-        let host = match IpAddr::from_str(host.as_str()) {
+        // split host and the optional scope_id (e.g., "fe80::1%3") if IPv6
+        let (host_str, scope_id) = match host.rsplit_once('%') {
+            Some((h, scope_id)) => {
+                let scope_id = scope_id.parse::<u32>().ok();
+                (h, scope_id)
+            }
+            None => (host.as_str(), None),
+        };
+
+        let host = match IpAddr::from_str(host_str) {
             Ok(h) => h,
             Err(e) => {
                 return Err(format!("Invalid host: {e:?}"));
@@ -345,6 +354,7 @@ async fn get_provider(
 
         Box::new(TcpProvider {
             addr: host,
+            scope_id,
             pairing_file,
             label: label.to_string(),
         })
