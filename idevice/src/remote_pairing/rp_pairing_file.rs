@@ -1,14 +1,12 @@
 // Jackson Coxson
 
 use std::path::Path;
-use std::hash::Hasher;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use plist::Dictionary;
 use plist_macro::plist_to_xml_bytes;
 use rsa::rand_core::OsRng;
 use serde::de::Error;
-use siphasher::sip::SipHasher;
 use tracing::{debug, warn};
 
 use crate::IdeviceError;
@@ -18,7 +16,7 @@ pub struct RpPairingFile {
     pub e_private_key: SigningKey,
     pub e_public_key: VerifyingKey,
     pub identifier: String,
-    pub alt_irk: Vec<u8>,
+    pub alt_irk: Option<Vec<u8>>,
 }
 
 impl RpPairingFile {
@@ -37,47 +35,9 @@ impl RpPairingFile {
         &self.identifier
     }
 
-    /// Validates an mDNS `authTag` against this pairing file's `alt_irk`.
-    ///
-    /// Algorithm mirrors Frida's `find_peer_matching_service`:
-    /// - SipHash keyed by `alt_irk` (16 bytes)
-    /// - Input is service `identifier` bytes
-    /// - Output is 8 bytes; expected auth tag is first 6 bytes in reverse order
-    pub fn validate_auth_tag(&self, identifier: &str, auth_tag: &[u8]) -> bool {
-        if self.alt_irk.len() != 16 {
-            warn!(
-                alt_irk_len = self.alt_irk.len(),
-                "invalid alt_irk length for auth_tag validation"
-            );
-            return false;
-        }
-
-        if auth_tag.len() != 6 {
-            warn!(
-                auth_tag_len = auth_tag.len(),
-                "invalid auth_tag length for validation"
-            );
-            return false;
-        }
-
-        let mut k0_bytes = [0u8; 8];
-        let mut k1_bytes = [0u8; 8];
-        k0_bytes.copy_from_slice(&self.alt_irk[..8]);
-        k1_bytes.copy_from_slice(&self.alt_irk[8..16]);
-
-        let mut sip = SipHasher::new_with_keys(
-            u64::from_le_bytes(k0_bytes),
-            u64::from_le_bytes(k1_bytes),
-        );
-        sip.write(identifier.as_bytes());
-        let output = sip.finish().to_le_bytes();
-
-        let mut expected_tag = [0u8; 6];
-        for i in 0..expected_tag.len() {
-            expected_tag[i] = output[5 - i];
-        }
-
-        auth_tag == expected_tag.as_slice()
+    /// Returns the `alt_irk` bytes (16 bytes).
+    pub fn alt_irk(&self) -> Option<&[u8]> {
+        self.alt_irk.as_deref()
     }
 
     pub fn generate(sending_host: &str) -> Self {
@@ -92,7 +52,7 @@ impl RpPairingFile {
             e_private_key: ed25519_private_key,
             e_public_key: ed25519_public_key,
             identifier,
-            alt_irk: Vec::new(),
+            alt_irk: None,
         }
     }
 
@@ -101,18 +61,28 @@ impl RpPairingFile {
         let ed25519_public_key = VerifyingKey::from(&ed25519_private_key);
         self.e_public_key = ed25519_public_key;
         self.e_private_key = ed25519_private_key;
-        self.alt_irk = Vec::new();
+        self.alt_irk = None;
     }
 
     /// Serialize to XML plist bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let v = crate::plist!(dict {
-            "public_key": self.e_public_key.to_bytes().to_vec(),
-            "private_key": self.e_private_key.to_bytes().to_vec(),
-            "identifier": self.identifier.as_str(),
-            "alt_irk": self.alt_irk.clone(),
-        });
-        plist_to_xml_bytes(&v)
+        let mut dict = plist::Dictionary::new();
+        dict.insert(
+            "public_key".into(),
+            plist::Value::Data(self.e_public_key.to_bytes().to_vec()),
+        );
+        dict.insert(
+            "private_key".into(),
+            plist::Value::Data(self.e_private_key.to_bytes().to_vec()),
+        );
+        dict.insert(
+            "identifier".into(),
+            plist::Value::String(self.identifier.clone()),
+        );
+        if let Some(irk) = &self.alt_irk {
+            dict.insert("alt_irk".into(), plist::Value::Data(irk.clone()));
+        }
+        plist_to_xml_bytes(&dict)
     }
 
     /// Parse from plist bytes (XML or binary).
@@ -160,10 +130,10 @@ impl RpPairingFile {
         };
 
         let alt_irk = match p.remove("alt_irk").and_then(|x| x.into_data()) {
-            Some(irk) => irk,
+            Some(irk) => Some(irk),
             None => {
-                warn!("plist did not contain alt_irk, defaulting to empty");
-                Vec::new()
+                warn!("plist did not contain alt_irk");
+                None
             }
         };
 

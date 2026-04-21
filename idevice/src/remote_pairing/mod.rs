@@ -30,7 +30,7 @@ mod tlv;
 pub mod tunnel;
 
 // export
-pub use peer_device::{parse_info_dictionary_from_tlv, parse_peer_device_from_tlv, PeerDevice};
+pub use peer_device::PeerDevice;
 pub use rp_pairing_file::RpPairingFile;
 pub use socket::{RpPairingSocket, RpPairingSocketProvider};
 #[cfg(feature = "openssl")]
@@ -54,8 +54,7 @@ pub struct RemotePairingClient<'a, R: RpPairingSocketProvider> {
     client_cipher: ChaCha20Poly1305,
     server_cipher: ChaCha20Poly1305,
 
-    peer_identifier: Option<String>,
-    peer_device: Option<PeerDevice>,
+    paired_peer_device: Option<PeerDevice>,
 }
 
 impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
@@ -74,8 +73,7 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
             encryption_key: initial_key,
             client_cipher,
             server_cipher,
-            peer_device: None,
-            peer_identifier: None,
+            paired_peer_device: None,
         }
     }
 
@@ -115,23 +113,18 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
         Ok(())
     }
 
-    /// Returns information about the paired peer device. Will return an error if not paired yet.
-    pub fn peer_device(&self) -> Result<&PeerDevice, IdeviceError> {
-        self.peer_device.as_ref().ok_or(IdeviceError::UnexpectedResponse(
-            "peer device is unavailable; call pair() first".into(),
-        ))
-    }
-
-    /// Returns the identifier of the paired peer device. Will return an error if not paired yet.
-    pub fn peer_identifier(&self) -> Result<String, IdeviceError> {
-        self.peer_identifier.clone().ok_or(IdeviceError::UnexpectedResponse(
-            "peer identifier is unavailable; call pair() first".into(),
-        ))
+    /// Returns peer device info captured during this client's successful `pair()` flow.
+    pub fn paired_peer_device(&self) -> Result<&PeerDevice, IdeviceError> {
+        self.paired_peer_device
+            .as_ref()
+            .ok_or(IdeviceError::UnexpectedResponse(
+                "paired peer device info is only available after a successful pair() call".into(),
+            ))
     }
 
     /// Create a remote pairing TCP tunnel and perform an RSD handshake over it.
     ///
-    /// `tunnel_host` is the hostname or IP address to which the tunnel should connect. 
+    /// `tunnel_host` is the hostname or IP address to which the tunnel should connect.
     ///
     /// Returns a TCP stack handle (which implements `RsdProvider`) and the initial
     /// `RsdHandshake`.
@@ -141,7 +134,7 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
     ) -> Result<(crate::tcp::handle::AdapterHandle, crate::rsd::RsdHandshake), IdeviceError> {
         self.attempt_pair_verify().await?;
         self.validate_pairing().await?;
-        
+
         let listener_port = self.create_tcp_listener().await?;
 
         let tunnel_stream = tokio::net::TcpStream::connect((tunnel_host, listener_port)).await?;
@@ -164,7 +157,8 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
         let server_ip: std::net::IpAddr = tunnel.info.server_address.parse()?;
 
         let raw_stream = tunnel.into_inner();
-        let mut adapter = crate::tcp::adapter::Adapter::new(Box::new(raw_stream), client_ip, server_ip);
+        let mut adapter =
+            crate::tcp::adapter::Adapter::new(Box::new(raw_stream), client_ip, server_ip);
         adapter.set_mss(mtu.saturating_sub(60));
         let mut handle = adapter.to_async_handle();
 
@@ -255,44 +249,6 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
 
         // ChaCha20Poly1305 AEAD cipher
         let cipher = ChaCha20Poly1305::new(chacha20poly1305::Key::from_slice(&okm));
-
-        // Extract peer identifier from the device's TLV response
-        let device_encrypt_data = match data
-            .iter()
-            .find(|x| x.tlv_type == tlv::PairingDataComponentType::EncryptedData)
-        {
-            Some(d) => d,
-            None => {
-                warn!("No encrypted data in TLV data");
-                return Err(IdeviceError::UnexpectedResponse(
-                    "missing encrypted data in pair-verify TLV data".into(),
-                ));
-            }
-        };
-        let plaintext = cipher
-            .decrypt(
-                Nonce::from_slice(b"\x00\x00\x00\x00PV-Msg02"),
-                Payload {
-                    msg: &device_encrypt_data.data,
-                    aad: b"",
-                },
-            )
-            .expect("decryption failure!");
-
-        let tlv = tlv::deserialize_tlv8(&plaintext)?;
-        let pear_identifier = match tlv
-            .iter()
-            .find(|x| x.tlv_type == tlv::PairingDataComponentType::Identifier)
-        {
-            Some(d) => String::from_utf8_lossy(&d.data),
-            None => {
-                warn!("No identifier in TLV data");
-                return Err(IdeviceError::UnexpectedResponse(
-                    "missing identifier in pair-verify TLV data".into(),
-                ));
-            }
-        };
-        self.peer_identifier = Some(pear_identifier.to_string());
 
         let ed25519_signing_key = &mut self.pairing_file.e_private_key;
 
@@ -449,10 +405,10 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
         let (salt, public_key, pin) = self.request_pair_consent(pin_callback, state).await?;
         let key = self.init_srp_context(&salt, &public_key, &pin).await?;
         let tlv = self.save_pair_record_on_peer(&key).await?;
-        let peer_device = parse_peer_device_from_tlv(&tlv)?;
+        let peer_device = peer_device::parse_peer_device_from_tlv(&tlv)?;
 
-        self.pairing_file.alt_irk = peer_device.alt_irk.clone().expect("missing alt_irk");
-        self.peer_device = Some(peer_device);
+        self.pairing_file.alt_irk = Some(peer_device.alt_irk.clone());
+        self.paired_peer_device = Some(peer_device);
 
         Ok(())
     }

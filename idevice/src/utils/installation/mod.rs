@@ -14,13 +14,11 @@
 mod helpers;
 use std::path::Path;
 
-use helpers::{
-    InstallPackage, prepare_dir_upload, prepare_dir_upload_rsd, prepare_file_upload,
-    prepare_file_upload_rsd,
-};
+use helpers::{InstallPackage, prepare_dir_upload, prepare_file_upload};
 
 use crate::{
-    IdeviceError, IdeviceService, RsdService, provider::{IdeviceProvider, RsdProvider}, rsd, services::installation_proxy::InstallationProxyClient
+    IdeviceError, IdeviceService, provider::IdeviceProvider,
+    services::installation_proxy::InstallationProxyClient,
 };
 
 #[cfg(feature = "rsd")]

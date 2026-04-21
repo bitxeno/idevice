@@ -151,7 +151,9 @@ fn parse_value(bytes: &[u8], offset: &mut usize) -> Result<Value, String> {
         0x32 => Ok(Value::Integer(
             (u32::from_le_bytes(read_exact::<4>(bytes, offset)?) as u64).into(),
         )),
-        0x33 => Ok(Value::Integer(u64::from_le_bytes(read_exact::<8>(bytes, offset)?).into())),
+        0x33 => Ok(Value::Integer(
+            u64::from_le_bytes(read_exact::<8>(bytes, offset)?).into(),
+        )),
         0x35 => {
             let n = u32::from_ne_bytes(read_exact::<4>(bytes, offset)?).swap_bytes();
             Ok(Value::Real(f32::from_bits(n) as f64))

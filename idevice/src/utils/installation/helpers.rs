@@ -1,17 +1,15 @@
 use async_zip::base::read::seek::ZipFileReader;
+use chrono::Local;
 use futures::AsyncReadExt as _;
 use plist_macro::plist;
 use std::{io::Cursor, path::Path};
-use chrono::Local;
 use tokio::io::{AsyncBufRead, AsyncSeek, BufReader};
 
 use crate::{
     IdeviceError, IdeviceService,
     afc::{AfcClient, opcode::AfcFopenMode},
     installation_proxy::InstallationProxyError,
-    provider::{IdeviceProvider, RsdProvider},
-    rsd,
-    RsdService,
+    provider::IdeviceProvider,
 };
 
 #[cfg(feature = "rsd")]
@@ -231,7 +229,10 @@ pub async fn afc_upload_dir(
                         || percent == 100;
                     if should_print {
                         let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
-                        println!("[{} INFO  idevice::afc_upload_dir] Upload files to device progress: {}%", ts, percent);
+                        println!(
+                            "[{} INFO  idevice::afc_upload_dir] Upload files to device progress: {}%",
+                            ts, percent
+                        );
                         prev_percent = Some(percent);
                     }
                 }
@@ -248,37 +249,6 @@ async fn upload_file_to_public_staging<P: AsRef<[u8]>>(
 ) -> Result<InstallPackage, IdeviceError> {
     // Connect to AFC via the generic service connector
     let mut afc = AfcClient::connect(provider).await?;
-
-    ensure_public_staging(&mut afc).await?;
-
-    let file = file.as_ref();
-
-    let package_type = determine_package_type(&file).await?;
-
-    let remote_path = format!("{PUBLIC_STAGING}/{}", package_type.get_remote_file()?);
-
-    let _ = afc.remove_all(&remote_path).await;
-    afc_upload_file(&mut afc, file, &remote_path).await?;
-
-    let options = match package_type {
-        PackageType::Ipcc => plist!({"PackageType": "CarrierBundle"}),
-        PackageType::Ipa(build_id) => plist!({"CFBundleIdentifier": build_id}),
-        PackageType::Unknown => plist!({}),
-    };
-
-    Ok(InstallPackage {
-        remote_package_path: remote_path,
-        options,
-    })
-}
-
-/// Upload a file to `PublicStaging` over RSD and return its InstallationProxy path
-async fn upload_file_to_public_staging_rsd<P: AsRef<[u8]>>(
-    provider: &mut impl RsdProvider,
-    handshake: &mut rsd::RsdHandshake,
-    file: P,
-) -> Result<InstallPackage, IdeviceError> {
-    let mut afc = AfcClient::connect_rsd(provider, handshake).await?;
 
     ensure_public_staging(&mut afc).await?;
 
@@ -340,34 +310,6 @@ async fn upload_dir_to_public_staging<P: AsRef<Path>>(
     file: P,
 ) -> Result<InstallPackage, IdeviceError> {
     let mut afc = AfcClient::connect(provider).await?;
-
-    ensure_public_staging(&mut afc).await?;
-
-    let file = file.as_ref();
-    let remote_folder_name = file
-        .iter()
-        .next_back()
-        .map(|x| x.to_string_lossy().to_string())
-        .unwrap_or(IPA_REMOTE_FILE.to_string());
-
-    let remote_path = format!("{PUBLIC_STAGING}/{remote_folder_name}");
-
-    let _ = afc.remove_all(&remote_path).await;
-    afc_upload_dir(&mut afc, file, &remote_path).await?;
-
-    Ok(InstallPackage {
-        remote_package_path: remote_path,
-        options: plist!({"PackageType": "Developer"}),
-    })
-}
-
-/// Recursively upload a directory to `PublicStaging` over RSD.
-async fn upload_dir_to_public_staging_rsd<P: AsRef<Path>>(
-    provider: &mut impl RsdProvider,
-    handshake: &mut rsd::RsdHandshake,
-    file: P,
-) -> Result<InstallPackage, IdeviceError> {
-    let mut afc = AfcClient::connect_rsd(provider, handshake).await?;
 
     ensure_public_staging(&mut afc).await?;
 
