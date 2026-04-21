@@ -16,6 +16,7 @@ pub struct RpPairingFile {
     pub e_private_key: SigningKey,
     pub e_public_key: VerifyingKey,
     pub identifier: String,
+    pub alt_irk: Option<Vec<u8>>,
 }
 
 impl RpPairingFile {
@@ -34,6 +35,11 @@ impl RpPairingFile {
         &self.identifier
     }
 
+    /// Returns the `alt_irk` bytes (16 bytes).
+    pub fn alt_irk(&self) -> Option<&[u8]> {
+        self.alt_irk.as_deref()
+    }
+
     pub fn generate(sending_host: &str) -> Self {
         // Ed25519 private key (persistent signing key)
         let ed25519_private_key = SigningKey::generate(&mut OsRng);
@@ -46,6 +52,7 @@ impl RpPairingFile {
             e_private_key: ed25519_private_key,
             e_public_key: ed25519_public_key,
             identifier,
+            alt_irk: None,
         }
     }
 
@@ -54,16 +61,28 @@ impl RpPairingFile {
         let ed25519_public_key = VerifyingKey::from(&ed25519_private_key);
         self.e_public_key = ed25519_public_key;
         self.e_private_key = ed25519_private_key;
+        self.alt_irk = None;
     }
 
     /// Serialize to XML plist bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let v = crate::plist!(dict {
-            "public_key": self.e_public_key.to_bytes().to_vec(),
-            "private_key": self.e_private_key.to_bytes().to_vec(),
-            "identifier": self.identifier.as_str()
-        });
-        plist_to_xml_bytes(&v)
+        let mut dict = plist::Dictionary::new();
+        dict.insert(
+            "public_key".into(),
+            plist::Value::Data(self.e_public_key.to_bytes().to_vec()),
+        );
+        dict.insert(
+            "private_key".into(),
+            plist::Value::Data(self.e_private_key.to_bytes().to_vec()),
+        );
+        dict.insert(
+            "identifier".into(),
+            plist::Value::String(self.identifier.clone()),
+        );
+        if let Some(irk) = &self.alt_irk {
+            dict.insert("alt_irk".into(), plist::Value::Data(irk.clone()));
+        }
+        plist_to_xml_bytes(&dict)
     }
 
     /// Parse from plist bytes (XML or binary).
@@ -110,10 +129,19 @@ impl RpPairingFile {
             }
         };
 
+        let alt_irk = match p.remove("alt_irk").and_then(|x| x.into_data()) {
+            Some(irk) => Some(irk),
+            None => {
+                warn!("plist did not contain alt_irk");
+                None
+            }
+        };
+
         Ok(Self {
             e_private_key: private_key,
             e_public_key: public_key,
             identifier,
+            alt_irk,
         })
     }
 
@@ -133,6 +161,7 @@ impl std::fmt::Debug for RpPairingFile {
         f.debug_struct("RpPairingFile")
             .field("e_public_key", &self.e_public_key)
             .field("identifier", &self.identifier)
+            .field("alt_irk", &self.alt_irk)
             .finish()
     }
 }

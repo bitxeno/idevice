@@ -22,6 +22,7 @@ use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 pub mod errors;
 mod opack;
+mod peer_device;
 mod rp_pairing_file;
 mod socket;
 pub mod tls_psk;
@@ -29,6 +30,7 @@ mod tlv;
 pub mod tunnel;
 
 // export
+pub use peer_device::PeerDevice;
 pub use rp_pairing_file::RpPairingFile;
 pub use socket::{RpPairingSocket, RpPairingSocketProvider};
 #[cfg(feature = "openssl")]
@@ -51,6 +53,8 @@ pub struct RemotePairingClient<'a, R: RpPairingSocketProvider> {
 
     client_cipher: ChaCha20Poly1305,
     server_cipher: ChaCha20Poly1305,
+
+    paired_peer_device: Option<PeerDevice>,
 }
 
 impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
@@ -69,6 +73,7 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
             encryption_key: initial_key,
             client_cipher,
             server_cipher,
+            paired_peer_device: None,
         }
     }
 
@@ -106,6 +111,15 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
             self.pair(pin_callback, state).await?;
         }
         Ok(())
+    }
+
+    /// Returns peer device info captured during this client's successful `pair()` flow.
+    pub fn paired_peer_device(&self) -> Result<&PeerDevice, IdeviceError> {
+        self.paired_peer_device
+            .as_ref()
+            .ok_or(IdeviceError::UnexpectedResponse(
+                "paired peer device info is only available after a successful pair() call".into(),
+            ))
     }
 
     pub async fn validate_pairing(&mut self) -> Result<(), IdeviceError> {
@@ -344,7 +358,11 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
     {
         let (salt, public_key, pin) = self.request_pair_consent(pin_callback, state).await?;
         let key = self.init_srp_context(&salt, &public_key, &pin).await?;
-        self.save_pair_record_on_peer(&key).await?;
+        let tlv = self.save_pair_record_on_peer(&key).await?;
+        let peer_device = peer_device::parse_peer_device_from_tlv(&tlv)?;
+
+        self.pairing_file.alt_irk = Some(peer_device.alt_irk.clone());
+        self.paired_peer_device = Some(peer_device);
 
         Ok(())
     }

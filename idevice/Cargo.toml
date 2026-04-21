@@ -62,6 +62,7 @@ aes = { version = "0.8", optional = true }
 cbc = { version = "0.1", features = ["alloc"], optional = true }
 hmac = { version = "0.12", optional = true }
 sha1 = { version = "0.10", optional = true }
+siphasher = { version = "1", optional = true }
 idevice-srp = { version = "0.6", optional = true }
 rand = { version = "0.10" }
 
@@ -146,6 +147,7 @@ remote_pairing = [
   "dep:hkdf",
   "dep:chacha20poly1305",
   "dep:idevice-srp",
+  "dep:siphasher",
   "dep:uuid",
   "dep:aes",
   "dep:cbc",
