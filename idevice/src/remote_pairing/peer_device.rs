@@ -9,11 +9,11 @@ use super::{opack, tlv};
 
 #[derive(Debug, Clone)]
 pub struct PeerDevice {
-    /// Device's peer identifier
+    /// peer identifier, same as the identifier returned in the `verifyManualPairing` response
     pub account_id: String,
-    /// Device's mDNS identity key
+    /// altIRK: 16-byte
     pub alt_irk: Vec<u8>,
-    /// Device's model identifier, e.g. "AppleTV11,1"
+    /// Device's model identifier, e.g. "iPhone14,4"
     pub model: String,
     /// Device's name
     pub name: String,

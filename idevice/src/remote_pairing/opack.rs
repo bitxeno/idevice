@@ -4,7 +4,7 @@ use plist::Value;
 
 pub fn opack_to_plist(bytes: &[u8]) -> Result<Value, String> {
     let mut offset = 0;
-    let value = parse_value(bytes, &mut offset)?;
+    let value = opack_to_plist_inner(bytes, &mut offset)?;
     if offset != bytes.len() {
         return Err(format!(
             "unexpected trailing bytes after OPACK payload: {}",
@@ -141,7 +141,7 @@ fn plist_to_opack_inner(node: &Value, buf: &mut Vec<u8>) {
     }
 }
 
-fn parse_value(bytes: &[u8], offset: &mut usize) -> Result<Value, String> {
+fn opack_to_plist_inner(bytes: &[u8], offset: &mut usize) -> Result<Value, String> {
     let tag = read_u8(bytes, offset)?;
     match tag {
         0x01 => Ok(Value::Boolean(true)),
@@ -162,93 +162,108 @@ fn parse_value(bytes: &[u8], offset: &mut usize) -> Result<Value, String> {
             let n = u64::from_ne_bytes(read_exact::<8>(bytes, offset)?).swap_bytes();
             Ok(Value::Real(f64::from_bits(n)))
         }
-        0x40..=0x60 => {
-            let len = (tag - 0x40) as usize;
-            Ok(Value::String(read_string(bytes, offset, len)?))
-        }
-        0x61 => {
-            let len = read_u8(bytes, offset)? as usize;
-            Ok(Value::String(read_string(bytes, offset, len)?))
-        }
-        0x62 => {
-            let len = u16::from_le_bytes(read_exact::<2>(bytes, offset)?) as usize;
-            Ok(Value::String(read_string(bytes, offset, len)?))
-        }
-        0x63 => {
-            let len = u32::from_le_bytes(read_exact::<4>(bytes, offset)?) as usize;
-            Ok(Value::String(read_string(bytes, offset, len)?))
-        }
-        0x64 => {
-            let len_u64 = u64::from_le_bytes(read_exact::<8>(bytes, offset)?);
-            let len = usize::try_from(len_u64)
-                .map_err(|_| format!("string too large for this platform: {len_u64}"))?;
-            Ok(Value::String(read_string(bytes, offset, len)?))
-        }
-        0x70..=0x90 => {
-            let len = (tag - 0x70) as usize;
-            Ok(Value::Data(read_vec(bytes, offset, len)?))
-        }
-        0x91 => {
-            let len = read_u8(bytes, offset)? as usize;
-            Ok(Value::Data(read_vec(bytes, offset, len)?))
-        }
-        0x92 => {
-            let len = u16::from_le_bytes(read_exact::<2>(bytes, offset)?) as usize;
-            Ok(Value::Data(read_vec(bytes, offset, len)?))
-        }
-        0x93 => {
-            let len = u32::from_le_bytes(read_exact::<4>(bytes, offset)?) as usize;
-            Ok(Value::Data(read_vec(bytes, offset, len)?))
-        }
-        0x94 => {
-            let len_u64 = u64::from_le_bytes(read_exact::<8>(bytes, offset)?);
-            let len = usize::try_from(len_u64)
-                .map_err(|_| format!("data too large for this platform: {len_u64}"))?;
-            Ok(Value::Data(read_vec(bytes, offset, len)?))
-        }
-        0xD0..=0xDE => {
-            let count = tag.wrapping_add(48) as usize;
-            let mut items = Vec::with_capacity(count);
-            for _ in 0..count {
-                items.push(parse_value(bytes, offset)?);
-            }
-            Ok(Value::Array(items))
-        }
-        0xDF => {
-            let mut items = Vec::new();
-            while !peek_is_terminator(bytes, *offset) {
-                items.push(parse_value(bytes, offset)?);
-            }
-            *offset += 1;
-            Ok(Value::Array(items))
-        }
-        0xE0..=0xEE => {
-            let count = tag.wrapping_add(32) as usize;
-            let mut dict = plist::Dictionary::new();
-            for _ in 0..count {
-                let key = parse_value(bytes, offset)?
-                    .into_string()
-                    .ok_or_else(|| "dictionary key is not a string".to_string())?;
-                let value = parse_value(bytes, offset)?;
-                dict.insert(key, value);
-            }
-            Ok(Value::Dictionary(dict))
-        }
-        0xEF => {
-            let mut dict = plist::Dictionary::new();
-            while !peek_is_terminator(bytes, *offset) {
-                let key = parse_value(bytes, offset)?
-                    .into_string()
-                    .ok_or_else(|| "dictionary key is not a string".to_string())?;
-                let value = parse_value(bytes, offset)?;
-                dict.insert(key, value);
-            }
-            *offset += 1;
-            Ok(Value::Dictionary(dict))
-        }
+        0x40..=0x64 => parse_string_value(tag, bytes, offset),
+        0x70..=0x94 => parse_data_value(tag, bytes, offset),
+        0xD0..=0xDE => parse_array(bytes, offset, Some((tag - 0xD0) as usize)),
+        0xDF => parse_array(bytes, offset, None),
+        0xE0..=0xEE => parse_dictionary(bytes, offset, Some((tag - 0xE0) as usize)),
+        0xEF => parse_dictionary(bytes, offset, None),
         0x03 => Err("unexpected OPACK terminator".into()),
         _ => Err(format!("unsupported OPACK tag: 0x{tag:02x}")),
     }
+}
+
+fn parse_string_value(bytes_tag: u8, bytes: &[u8], offset: &mut usize) -> Result<Value, String> {
+    let len = read_sized_len(
+        bytes_tag, bytes, offset, 0x40, 0x61, 0x62, 0x63, 0x64, "string",
+    )?;
+    Ok(Value::String(read_string(bytes, offset, len)?))
+}
+
+fn parse_data_value(bytes_tag: u8, bytes: &[u8], offset: &mut usize) -> Result<Value, String> {
+    let len = read_sized_len(
+        bytes_tag, bytes, offset, 0x70, 0x91, 0x92, 0x93, 0x94, "data",
+    )?;
+    Ok(Value::Data(read_vec(bytes, offset, len)?))
+}
+
+fn read_sized_len(
+    tag: u8,
+    bytes: &[u8],
+    offset: &mut usize,
+    inline_base: u8,
+    u8_tag: u8,
+    u16_tag: u8,
+    u32_tag: u8,
+    u64_tag: u8,
+    kind: &str,
+) -> Result<usize, String> {
+    match tag {
+        t if (inline_base..u8_tag).contains(&t) => Ok((tag - inline_base) as usize),
+        t if t == u8_tag => Ok(read_u8(bytes, offset)? as usize),
+        t if t == u16_tag => Ok(u16::from_le_bytes(read_exact::<2>(bytes, offset)?) as usize),
+        t if t == u32_tag => Ok(u32::from_le_bytes(read_exact::<4>(bytes, offset)?) as usize),
+        t if t == u64_tag => {
+            let len_u64 = u64::from_le_bytes(read_exact::<8>(bytes, offset)?);
+            usize::try_from(len_u64)
+                .map_err(|_| format!("{kind} too large for this platform: {len_u64}"))
+        }
+        _ => Err(format!("unsupported OPACK {kind} tag: 0x{tag:02x}")),
+    }
+}
+
+fn parse_array(bytes: &[u8], offset: &mut usize, count: Option<usize>) -> Result<Value, String> {
+    let mut items = Vec::with_capacity(count.unwrap_or(0));
+
+    match count {
+        Some(count) => {
+            for _ in 0..count {
+                items.push(opack_to_plist_inner(bytes, offset)?);
+            }
+        }
+        None => {
+            while !peek_is_terminator(bytes, *offset) {
+                items.push(opack_to_plist_inner(bytes, offset)?);
+            }
+            *offset += 1;
+        }
+    }
+
+    Ok(Value::Array(items))
+}
+
+fn parse_dictionary(
+    bytes: &[u8],
+    offset: &mut usize,
+    count: Option<usize>,
+) -> Result<Value, String> {
+    let mut dict = plist::Dictionary::new();
+
+    match count {
+        Some(count) => {
+            for _ in 0..count {
+                let key = read_dictionary_key(bytes, offset)?;
+                let value = opack_to_plist_inner(bytes, offset)?;
+                dict.insert(key, value);
+            }
+        }
+        None => {
+            while !peek_is_terminator(bytes, *offset) {
+                let key = read_dictionary_key(bytes, offset)?;
+                let value = opack_to_plist_inner(bytes, offset)?;
+                dict.insert(key, value);
+            }
+            *offset += 1;
+        }
+    }
+
+    Ok(Value::Dictionary(dict))
+}
+
+fn read_dictionary_key(bytes: &[u8], offset: &mut usize) -> Result<String, String> {
+    opack_to_plist_inner(bytes, offset)?
+        .into_string()
+        .ok_or_else(|| "dictionary key is not a string".to_string())
 }
 
 fn peek_is_terminator(bytes: &[u8], offset: usize) -> bool {
@@ -318,6 +333,38 @@ mod tests {
             0x6c, 0x4e, 0x63, 0x6f, 0x6d, 0x70, 0x75, 0x74, 0x65, 0x72, 0x2d, 0x6d, 0x6f, 0x64,
             0x65, 0x6c, 0x44, 0x6e, 0x61, 0x6d, 0x65, 0x46, 0x72, 0x65, 0x65, 0x65, 0x65, 0x65,
         ];
+
+        println!("{res:02X?}");
+        assert_eq!(res, expected);
+    }
+
+    #[test]
+    fn t2() {
+        let v = [
+            0xe7, 0x46, 0x61, 0x6c, 0x74, 0x49, 0x52, 0x4b, 0x80, 0xe9, 0xe8, 0x2d, 0xc0, 0x6a,
+            0x49, 0x79, 0x6b, 0x56, 0x6f, 0x54, 0x00, 0x19, 0xb1, 0xc7, 0x7b, 0x46, 0x62, 0x74,
+            0x41, 0x64, 0x64, 0x72, 0x51, 0x31, 0x31, 0x3a, 0x32, 0x32, 0x3a, 0x33, 0x33, 0x3a,
+            0x34, 0x34, 0x3a, 0x35, 0x35, 0x3a, 0x36, 0x36, 0x43, 0x6d, 0x61, 0x63, 0x76, 0x11,
+            0x22, 0x33, 0x44, 0x55, 0x66, 0x5b, 0x72, 0x65, 0x6d, 0x6f, 0x74, 0x65, 0x70, 0x61,
+            0x69, 0x72, 0x69, 0x6e, 0x67, 0x5f, 0x73, 0x65, 0x72, 0x69, 0x61, 0x6c, 0x5f, 0x6e,
+            0x75, 0x6d, 0x62, 0x65, 0x72, 0x4c, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41,
+            0x41, 0x41, 0x41, 0x41, 0x49, 0x61, 0x63, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x49, 0x44,
+            0x48, 0x6c, 0x6f, 0x6c, 0x73, 0x73, 0x73, 0x73, 0x73, 0x45, 0x6d, 0x6f, 0x64, 0x65,
+            0x6c, 0x4e, 0x63, 0x6f, 0x6d, 0x70, 0x75, 0x74, 0x65, 0x72, 0x2d, 0x6d, 0x6f, 0x64,
+            0x65, 0x6c, 0x44, 0x6e, 0x61, 0x6d, 0x65, 0x46, 0x72, 0x65, 0x65, 0x65, 0x65, 0x65,
+        ];
+
+        let expected = crate::plist!({
+            "altIRK": b"\xe9\xe8-\xc0jIykVoT\x00\x19\xb1\xc7{".to_vec(),
+            "btAddr": "11:22:33:44:55:66",
+            "mac": b"\x11\x22\x33\x44\x55\x66".to_vec(),
+            "remotepairing_serial_number": "AAAAAAAAAAAA",
+            "accountID": "lolsssss",
+            "model": "computer-model",
+            "name": "reeeee",
+        });
+
+        let res = super::opack_to_plist(&v).unwrap();
 
         println!("{res:02X?}");
         assert_eq!(res, expected);
