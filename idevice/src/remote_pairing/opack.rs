@@ -175,40 +175,65 @@ fn opack_to_plist_inner(bytes: &[u8], offset: &mut usize) -> Result<Value, Strin
 
 fn parse_string_value(bytes_tag: u8, bytes: &[u8], offset: &mut usize) -> Result<Value, String> {
     let len = read_sized_len(
-        bytes_tag, bytes, offset, 0x40, 0x61, 0x62, 0x63, 0x64, "string",
+        bytes_tag,
+        bytes,
+        offset,
+        SizedLenTags {
+            inline_base: 0x40,
+            u8_tag: 0x61,
+            u16_tag: 0x62,
+            u32_tag: 0x63,
+            u64_tag: 0x64,
+            kind: "string",
+        },
     )?;
     Ok(Value::String(read_string(bytes, offset, len)?))
 }
 
 fn parse_data_value(bytes_tag: u8, bytes: &[u8], offset: &mut usize) -> Result<Value, String> {
     let len = read_sized_len(
-        bytes_tag, bytes, offset, 0x70, 0x91, 0x92, 0x93, 0x94, "data",
+        bytes_tag,
+        bytes,
+        offset,
+        SizedLenTags {
+            inline_base: 0x70,
+            u8_tag: 0x91,
+            u16_tag: 0x92,
+            u32_tag: 0x93,
+            u64_tag: 0x94,
+            kind: "data",
+        },
     )?;
     Ok(Value::Data(read_vec(bytes, offset, len)?))
+}
+
+#[derive(Copy, Clone)]
+struct SizedLenTags {
+    inline_base: u8,
+    u8_tag: u8,
+    u16_tag: u8,
+    u32_tag: u8,
+    u64_tag: u8,
+    kind: &'static str,
 }
 
 fn read_sized_len(
     tag: u8,
     bytes: &[u8],
     offset: &mut usize,
-    inline_base: u8,
-    u8_tag: u8,
-    u16_tag: u8,
-    u32_tag: u8,
-    u64_tag: u8,
-    kind: &str,
+    tags: SizedLenTags,
 ) -> Result<usize, String> {
     match tag {
-        t if (inline_base..u8_tag).contains(&t) => Ok((tag - inline_base) as usize),
-        t if t == u8_tag => Ok(read_u8(bytes, offset)? as usize),
-        t if t == u16_tag => Ok(u16::from_le_bytes(read_exact::<2>(bytes, offset)?) as usize),
-        t if t == u32_tag => Ok(u32::from_le_bytes(read_exact::<4>(bytes, offset)?) as usize),
-        t if t == u64_tag => {
+        t if (tags.inline_base..tags.u8_tag).contains(&t) => Ok((tag - tags.inline_base) as usize),
+        t if t == tags.u8_tag => Ok(read_u8(bytes, offset)? as usize),
+        t if t == tags.u16_tag => Ok(u16::from_le_bytes(read_exact::<2>(bytes, offset)?) as usize),
+        t if t == tags.u32_tag => Ok(u32::from_le_bytes(read_exact::<4>(bytes, offset)?) as usize),
+        t if t == tags.u64_tag => {
             let len_u64 = u64::from_le_bytes(read_exact::<8>(bytes, offset)?);
             usize::try_from(len_u64)
-                .map_err(|_| format!("{kind} too large for this platform: {len_u64}"))
+                .map_err(|_| format!("{} too large for this platform: {len_u64}", tags.kind))
         }
-        _ => Err(format!("unsupported OPACK {kind} tag: 0x{tag:02x}")),
+        _ => Err(format!("unsupported OPACK {} tag: 0x{tag:02x}", tags.kind)),
     }
 }
 

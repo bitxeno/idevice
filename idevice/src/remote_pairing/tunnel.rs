@@ -6,7 +6,7 @@
 
 use tracing::debug;
 
-use crate::IdeviceError;
+use crate::{IdeviceError, ReadWrite};
 
 // Re-export for backwards compatibility
 pub use crate::tunnel::{CdTunnel, TunnelInfo};
@@ -22,9 +22,9 @@ const DEFAULT_MTU: u16 = 16000;
 /// This uses a built-in TLS 1.2 PSK-AES256-CBC-SHA384 implementation with no
 /// external TLS library dependency.
 pub async fn connect_tls_psk_tunnel_native(
-    stream: tokio::net::TcpStream,
+    stream: Box<dyn ReadWrite>,
     encryption_key: &[u8],
-) -> Result<CdTunnel<super::tls_psk::TlsPskStream<tokio::net::TcpStream>>, IdeviceError> {
+) -> Result<CdTunnel<super::tls_psk::TlsPskStream<Box<dyn ReadWrite>>>, IdeviceError> {
     let mut tls_stream = super::tls_psk::tls_psk_handshake(stream, encryption_key).await?;
     debug!("Native TLS-PSK handshake complete");
 

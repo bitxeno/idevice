@@ -131,7 +131,7 @@ pub(crate) fn c_socket_to_rust(
     }
 }
 
-pub(crate) fn c_addr_to_rust(addr: *const SockAddr) -> Result<IpAddr, IdeviceError> {
+pub(crate) fn c_addr_to_rust(addr: *const SockAddr) -> Result<(IpAddr, Option<u32>), IdeviceError> {
     if addr.is_null() {
         tracing::error!("null sockaddr");
         return invalid_arg();
@@ -148,13 +148,17 @@ pub(crate) fn c_addr_to_rust(addr: *const SockAddr) -> Result<IpAddr, IdeviceErr
             libc::AF_INET => {
                 let a = &*(addr as *const sockaddr_in);
                 let octets = u32::from_be(a.sin_addr.s_addr).to_be_bytes();
-                Ok(IpAddr::V4(Ipv4Addr::new(
-                    octets[0], octets[1], octets[2], octets[3],
-                )))
+                Ok((
+                    IpAddr::V4(Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3])),
+                    None,
+                ))
             }
             libc::AF_INET6 => {
                 let a = &*(addr as *const sockaddr_in6);
-                Ok(IpAddr::V6(Ipv6Addr::from(a.sin6_addr.s6_addr)))
+                Ok((
+                    IpAddr::V6(Ipv6Addr::from(a.sin6_addr.s6_addr)),
+                    Some(a.sin6_scope_id),
+                ))
             }
             _ => {
                 tracing::error!(
@@ -170,12 +174,13 @@ pub(crate) fn c_addr_to_rust(addr: *const SockAddr) -> Result<IpAddr, IdeviceErr
             AF_INET => {
                 let a = &*(addr as *const sockaddr_in);
                 let ip_be = a.sin_addr.S_un.S_addr;
-                Ok(IpAddr::V4(Ipv4Addr::from(u32::from_be(ip_be))))
+                Ok((IpAddr::V4(Ipv4Addr::from(u32::from_be(ip_be))), None))
             }
             AF_INET6 => {
                 let a = &*(addr as *const sockaddr_in6);
                 let bytes: [u8; 16] = a.sin6_addr.u.Byte;
-                Ok(IpAddr::V6(Ipv6Addr::from(bytes)))
+                let scope_id: u32 = a.Anonymous.sin6_scope_id;
+                Ok((IpAddr::V6(Ipv6Addr::from(bytes)), Some(scope_id)))
             }
             _ => {
                 tracing::error!("Unsupported socket address family: {}", (*addr).sa_family);

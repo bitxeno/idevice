@@ -5,6 +5,9 @@
 
 use std::{future::Future, pin::Pin};
 
+use std::net::IpAddr;
+use std::net::{SocketAddr, SocketAddrV6};
+
 #[cfg(feature = "tcp")]
 use tokio::net::TcpStream;
 
@@ -55,6 +58,8 @@ pub trait RsdProvider: Unpin + Send + Sync + std::fmt::Debug {
 pub struct TcpProvider {
     /// IP address of the device
     pub addr: std::net::IpAddr,
+    /// An optional scope ID may be provided for IPv6 addresses.
+    pub scope_id: Option<u32>,
     /// Pairing file for secure communication
     pub pairing_file: PairingFile,
     /// Label identifying this connection
@@ -76,8 +81,12 @@ impl IdeviceProvider for TcpProvider {
     ) -> Pin<Box<dyn Future<Output = Result<Idevice, IdeviceError>> + Send>> {
         let addr = self.addr;
         let label = self.label.clone();
+        let scope_id = self.scope_id.unwrap_or(0);
         Box::pin(async move {
-            let socket_addr = std::net::SocketAddr::new(addr, port);
+            let socket_addr = match addr {
+                IpAddr::V4(_) => SocketAddr::new(addr, port),
+                IpAddr::V6(ipv6) => SocketAddr::V6(SocketAddrV6::new(ipv6, port, 0, scope_id)),
+            };
             let stream = TcpStream::connect(socket_addr).await?;
             Ok(Idevice::new(Box::new(stream), label))
         })
