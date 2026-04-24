@@ -149,7 +149,8 @@ impl<'a, R: RpPairingSocketProvider> RemotePairingClient<'a, R> {
         let listener_port = self.create_tcp_listener().await?;
 
         let tunnel_stream = tokio::net::TcpStream::connect((tunnel_host, listener_port)).await?;
-        let tunnel = connect_tls_psk_tunnel_native(tunnel_stream, self.encryption_key()).await?;
+        let tunnel =
+            connect_tls_psk_tunnel_native(Box::new(tunnel_stream), self.encryption_key()).await?;
         debug!("Tunnel established!");
         debug!("  Client address: {}", tunnel.info.client_address);
         debug!("  Server address: {}", tunnel.info.server_address);
