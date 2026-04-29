@@ -2,7 +2,7 @@ use async_zip::base::read::seek::ZipFileReader;
 use chrono::Local;
 use futures::AsyncReadExt as _;
 use plist_macro::plist;
-use std::{io::Cursor, path::Path};
+use std::{future::Future, io::Cursor, path::Path};
 use tokio::io::{AsyncBufRead, AsyncSeek, BufReader};
 
 use crate::{
@@ -20,6 +20,8 @@ pub const PUBLIC_STAGING: &str = "PublicStaging";
 pub const IPCC_REMOTE_FILE: &str = "idevice.ipcc";
 
 pub const IPA_REMOTE_FILE: &str = "idevice.ipa";
+
+const AFC_UPLOAD_CHUNK_SIZE: usize = 1024 * 1024; // this is what libimobiledevice uses in afcclient
 
 /// Result of a prepared upload, containing the remote path to use in Install/Upgrade
 pub struct InstallPackage {
@@ -159,6 +161,60 @@ pub async fn afc_upload_file<F: AsRef<[u8]>>(
 ) -> Result<(), IdeviceError> {
     let mut fd = afc.open(remote_path, AfcFopenMode::WrOnly).await?;
     fd.write_entire(file.as_ref()).await?;
+    fd.close().await
+}
+
+fn progress_updates(
+    uploaded_bytes: usize,
+    total_bytes: usize,
+    last_reported_percent: &mut u64,
+) -> std::ops::RangeInclusive<u64> {
+    let percent = ((((uploaded_bytes as u128) * 100) / (total_bytes as u128)).min(100u128)) as u64;
+    let start = last_reported_percent.saturating_add(1);
+
+    if percent > *last_reported_percent {
+        *last_reported_percent = percent;
+    }
+
+    start..=percent
+}
+
+/// Upload a single file to a destination path on device using AFC and report progress.
+///
+/// The callback receives `(percent_complete, state)` and is invoked once for each newly reached
+/// integer percentage point.
+pub async fn afc_upload_file_callback<F: AsRef<[u8]>, Fut, S>(
+    afc: &mut AfcClient,
+    file: F,
+    remote_path: &str,
+    callback: impl Fn((u64, S)) -> Fut,
+    state: S,
+) -> Result<(), IdeviceError>
+where
+    Fut: Future<Output = ()>,
+    S: Clone,
+{
+    let file = file.as_ref();
+    let total_bytes = file.len();
+    let mut fd = afc.open(remote_path, AfcFopenMode::WrOnly).await?;
+
+    if total_bytes == 0 {
+        callback((100, state)).await;
+        return fd.close().await;
+    }
+
+    let mut uploaded_bytes = 0usize;
+    let mut last_reported_percent = 0u64;
+
+    for chunk in file.chunks(AFC_UPLOAD_CHUNK_SIZE) {
+        fd.write_entire(chunk).await?;
+        uploaded_bytes += chunk.len();
+
+        for percent in progress_updates(uploaded_bytes, total_bytes, &mut last_reported_percent) {
+            callback((percent, state.clone())).await;
+        }
+    }
+
     fd.close().await
 }
 
@@ -304,6 +360,44 @@ async fn upload_file_to_public_staging_rsd<P: AsRef<[u8]>>(
     })
 }
 
+/// Upload a file to `PublicStaging` over RSD, reporting AFC upload progress.
+#[cfg(feature = "rsd")]
+#[allow(dead_code)]
+async fn upload_file_to_public_staging_rsd_callback<P: AsRef<[u8]>, Fut, S>(
+    provider: &mut impl RsdProvider,
+    handshake: &mut rsd::RsdHandshake,
+    file: P,
+    callback: impl Fn((u64, S)) -> Fut,
+    state: S,
+) -> Result<InstallPackage, IdeviceError>
+where
+    Fut: Future<Output = ()>,
+    S: Clone,
+{
+    let mut afc = AfcClient::connect_rsd(provider, handshake).await?;
+
+    ensure_public_staging(&mut afc).await?;
+
+    let file = file.as_ref();
+
+    let package_type = determine_package_type(&file).await?;
+
+    let remote_path = format!("{PUBLIC_STAGING}/{}", package_type.get_remote_file()?);
+
+    afc_upload_file_callback(&mut afc, file, &remote_path, callback, state).await?;
+
+    let options = match package_type {
+        PackageType::Ipcc => plist!({"PackageType": "CarrierBundle"}),
+        PackageType::Ipa(build_id) => plist!({"CFBundleIdentifier": build_id}),
+        PackageType::Unknown => plist!({}),
+    };
+
+    Ok(InstallPackage {
+        remote_package_path: remote_path,
+        options,
+    })
+}
+
 /// Recursively Upload a directory of file to `PublicStaging`
 async fn upload_dir_to_public_staging<P: AsRef<Path>>(
     provider: &dyn IdeviceProvider,
@@ -390,6 +484,35 @@ pub async fn prepare_file_upload_rsd(
         remote_package_path,
         options,
     } = upload_file_to_public_staging_rsd(provider, handshake, data).await?;
+    let full_options = plist!({
+        :<? caller_options,
+        :< options,
+    });
+
+    Ok(InstallPackage {
+        remote_package_path,
+        options: full_options,
+    })
+}
+
+#[cfg(feature = "rsd")]
+pub async fn prepare_file_upload_with_callback_rsd<Fut, S>(
+    provider: &mut impl RsdProvider,
+    handshake: &mut rsd::RsdHandshake,
+    data: impl AsRef<[u8]>,
+    caller_options: Option<plist::Value>,
+    callback: impl Fn((u64, S)) -> Fut,
+    state: S,
+) -> Result<InstallPackage, IdeviceError>
+where
+    Fut: Future<Output = ()>,
+    S: Clone,
+{
+    let InstallPackage {
+        remote_package_path,
+        options,
+    } = upload_file_to_public_staging_rsd_callback(provider, handshake, data, callback, state)
+        .await?;
     let full_options = plist!({
         :<? caller_options,
         :< options,

@@ -24,7 +24,7 @@ use crate::{
 #[cfg(feature = "rsd")]
 use crate::{RsdService, provider::RsdProvider, rsd};
 #[cfg(feature = "rsd")]
-use helpers::{prepare_dir_upload_rsd, prepare_file_upload_rsd};
+use helpers::{prepare_dir_upload_rsd, prepare_file_upload_rsd, prepare_file_upload_with_callback_rsd};
 
 /// Install an application by first uploading the local package and then invoking InstallationProxy.
 ///
@@ -109,6 +109,62 @@ where
     } else {
         let data = tokio::fs::read(&local_path).await?;
         install_bytes_with_callback_rsd(provider, handshake, data, options, callback, state).await
+    }
+}
+
+/// Same as `install_package_with_callback_rsd` but also providing upload progress updates while
+/// staging a file package over AFC.
+///
+/// For directory packages, upload progress is not reported and the function behaves the same as
+/// `install_package_with_callback_rsd`.
+#[cfg(feature = "rsd")]
+#[allow(clippy::too_many_arguments)]
+pub async fn install_package_with_upload_callback_rsd<
+    P: AsRef<Path>,
+    UploadFut,
+    UploadS,
+    Fut,
+    S,
+>(
+    provider: &mut impl RsdProvider,
+    handshake: &mut rsd::RsdHandshake,
+    local_path: P,
+    options: Option<plist::Value>,
+    upload_callback: impl Fn((u64, UploadS)) -> UploadFut,
+    upload_state: UploadS,
+    callback: impl Fn((u64, S)) -> Fut,
+    state: S,
+) -> Result<(), IdeviceError>
+where
+    UploadFut: std::future::Future<Output = ()>,
+    UploadS: Clone,
+    Fut: std::future::Future<Output = ()>,
+    S: Clone,
+{
+    let metadata = tokio::fs::metadata(&local_path).await?;
+
+    if metadata.is_dir() {
+        let InstallPackage {
+            remote_package_path,
+            options,
+        } = prepare_dir_upload_rsd(provider, handshake, local_path, options).await?;
+        let mut inst = InstallationProxyClient::connect_rsd(provider, handshake).await?;
+
+        inst.upgrade_with_callback(remote_package_path, Some(options), callback, state)
+            .await
+    } else {
+        let data = tokio::fs::read(&local_path).await?;
+        install_bytes_with_upload_callback_rsd(
+            provider,
+            handshake,
+            data,
+            options,
+            upload_callback,
+            upload_state,
+            callback,
+            state,
+        )
+        .await
     }
 }
 
@@ -266,6 +322,44 @@ where
         remote_package_path,
         options,
     } = prepare_file_upload_rsd(provider, handshake, data, options).await?;
+    let mut inst = InstallationProxyClient::connect_rsd(provider, handshake).await?;
+
+    inst.install_with_callback(remote_package_path, Some(options), callback, state)
+        .await
+}
+
+/// Same as `install_bytes_with_callback_rsd` but also reporting AFC upload progress while staging
+/// the file to `PublicStaging`.
+#[cfg(feature = "rsd")]
+#[allow(clippy::too_many_arguments)]
+pub async fn install_bytes_with_upload_callback_rsd<UploadFut, UploadS, Fut, S>(
+    provider: &mut impl RsdProvider,
+    handshake: &mut rsd::RsdHandshake,
+    data: impl AsRef<[u8]>,
+    options: Option<plist::Value>,
+    upload_callback: impl Fn((u64, UploadS)) -> UploadFut,
+    upload_state: UploadS,
+    callback: impl Fn((u64, S)) -> Fut,
+    state: S,
+) -> Result<(), IdeviceError>
+where
+    UploadFut: std::future::Future<Output = ()>,
+    UploadS: Clone,
+    Fut: std::future::Future<Output = ()>,
+    S: Clone,
+{
+    let InstallPackage {
+        remote_package_path,
+        options,
+    } = prepare_file_upload_with_callback_rsd(
+        provider,
+        handshake,
+        data,
+        options,
+        upload_callback,
+        upload_state,
+    )
+    .await?;
     let mut inst = InstallationProxyClient::connect_rsd(provider, handshake).await?;
 
     inst.install_with_callback(remote_package_path, Some(options), callback, state)
